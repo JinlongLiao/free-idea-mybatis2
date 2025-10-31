@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "cn.wuzhizhan.idea.mybatis"
-version = "0.0.1-SNAPSHOT"
+version = "0.0.1"
 
 repositories {
     flatDir {
@@ -51,6 +51,11 @@ tasks {
     withType<JavaCompile> {
         sourceCompatibility = "21"
         targetCompatibility = "21"
+    }
+
+    // 禁用buildSearchableOptions任务，因为它在buildPlugin过程中失败
+    buildSearchableOptions {
+        enabled = false
     }
 }
 
