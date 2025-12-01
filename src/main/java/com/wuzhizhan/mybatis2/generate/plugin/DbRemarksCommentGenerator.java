@@ -89,13 +89,13 @@ public class DbRemarksCommentGenerator implements CommentGenerator {
             if (!introspectedColumn.isNullable() && !isId)
                 field.addAnnotation("@NotEmpty");
             if (introspectedColumn.isIdentity()) {
-                if (introspectedTable.getTableConfiguration().getGeneratedKey().getRuntimeSqlStatement().equals("JDBC")) {
+                if (introspectedTable.getTableConfiguration().getGeneratedKey().get().getRuntimeSqlStatement().equals("JDBC")) {
                     field.addAnnotation("@GeneratedValue(generator = \"JDBC\")");
                 } else {
                     field.addAnnotation("@GeneratedValue(strategy = GenerationType.IDENTITY)");
                 }
             } else if (introspectedColumn.isSequenceColumn()) {
-                field.addAnnotation("@SequenceGenerator(name=\"\",sequenceName=\"" + introspectedTable.getTableConfiguration().getGeneratedKey().getRuntimeSqlStatement() + "\")");
+                field.addAnnotation("@SequenceGenerator(name=\"\",sequenceName=\"" + introspectedTable.getTableConfiguration().getGeneratedKey().get().getRuntimeSqlStatement() + "\")");
             }
         }
     }
