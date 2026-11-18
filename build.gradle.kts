@@ -1,16 +1,12 @@
 plugins {
 	id("java")
-	id("org.jetbrains.kotlin.jvm") version "2.2.21"
-	id("org.jetbrains.intellij.platform") version "2.9.0"
+	id("org.jetbrains.intellij.platform") version "2.20.1"
 }
 
 group = "cn.wuzhizhan.idea.mybatis"
-version = "0.0.2"
+version = "0.0.3"
 
 repositories {
-	flatDir {
-		dirs("libs")
-	}
 	mavenCentral()
 	intellijPlatform {
 		defaultRepositories()
@@ -21,46 +17,36 @@ repositories {
 // Configure IntelliJ Platform Gradle Plugin
 // Read more: https://plugins.jetbrains.com/docs/intellij/tools-intellij-platform-gradle-plugin.html
 dependencies {
+	implementation("org.mybatis.generator:mybatis-generator-core:2.0.0")
+	testImplementation("org.junit.jupiter:junit-jupiter:5.14.0")
+	testRuntimeOnly("org.junit.platform:junit-platform-launcher:1.14.0")
 
 	intellijPlatform {
-		implementation("org.mybatis.generator:mybatis-generator-core:1.4.2")
-		testImplementation("org.junit.jupiter:junit-jupiter-engine:5.14.0")
-		testImplementation("org.junit.jupiter:junit-jupiter-api:5.14.0")
-		create("IU", "2025.2.5")
-		testFramework(org.jetbrains.intellij.platform.gradle.TestFrameworkType.Platform)
-		// Add necessary plugin dependencies for compilation here, example:
+		intellijIdea("2026.3")
 		bundledPlugin("com.intellij.java")
 		bundledPlugin("com.intellij.database")
 		bundledPlugin("com.intellij.spring")
+		bundledModule("intellij.spring.core.analysis.jvm")
+		// IDEA 2026.3 将 XML PSI 和 DOM API 移到了独立的内置插件。
+		bundledPlugin("com.intellij.xml")
 	}
 }
 
 intellijPlatform {
+	// 构建插件 ZIP 时跳过设置搜索索引及其打包任务。
+	buildSearchableOptions = false
+
 	pluginConfiguration {
 		ideaVersion {
-			sinceBuild = "251"
+			sinceBuild = "263"
 		}
-		changeNotes = """
-            Initial version
-        """.trimIndent()
 	}
 }
 
-tasks {
-	// Set the JVM compatibility versions
-	withType<JavaCompile> {
-		sourceCompatibility = "21"
-		targetCompatibility = "21"
-	}
-
-	// 禁用buildSearchableOptions任务，因为它在buildPlugin过程中失败
-	buildSearchableOptions {
-		enabled = false
-	}
+java {
+	toolchain.languageVersion.set(JavaLanguageVersion.of(25))
 }
 
-kotlin {
-	compilerOptions {
-		jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
-	}
+tasks.test {
+	useJUnitPlatform()
 }

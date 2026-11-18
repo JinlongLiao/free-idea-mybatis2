@@ -4,8 +4,14 @@
     <vendor email="jinlongliao@foxmail.com" url="https://github.com/JinlongLiao/free-mybatis-plugin">JinlongLiao
     </vendor>
 
-    <version>2024.10.31</version>
+    <version>0.0.3</version>
     <change-notes><![CDATA[
+        <h4>0.0.3</h4>
+        <ul>
+            <li>适配 IntelliJ IDEA 2026.3，最低支持平台分支调整为 263。</li>
+            <li>适配 XML 模块拆分及 Spring MyBatis Mapper 识别接口迁移。</li>
+            <li>迁移至 MyBatis Generator 2.0.0，生成与合并完成后再替换 Mapper XML。</li>
+        </ul>
         <h4>2024.10.31</h4>
         <ul>
             <li>doc: 升级依赖</li>
@@ -60,15 +66,19 @@
             <li>根据数据库注解，生成swagger model注解</li>
         </ul>
     ]]></description>
-    <idea-version since-build="203.6682.168"/>
+    <idea-version since-build="263"/>
 
     <!-- please see https://plugins.jetbrains.com/docs/intellij/plugin-compatibility.html
          on how to target different products -->
     <depends>com.intellij.database</depends>
     <depends>com.intellij.spring</depends>
+    <depends>com.intellij.xml</depends>
     <depends>com.intellij.modules.platform</depends>
     <depends>com.intellij.modules.lang</depends>
     <depends>com.intellij.modules.java</depends>
+    <dependencies>
+        <module name="intellij.spring.core.analysis.jvm"/>
+    </dependencies>
 
     <extensions defaultExtensionNs="com.intellij">
         <dom.fileMetaData implementation="com.wuzhizhan.mybatis2.dom.description.MapperDescription"

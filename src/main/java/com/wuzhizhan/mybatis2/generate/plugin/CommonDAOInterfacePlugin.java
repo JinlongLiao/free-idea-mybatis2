@@ -2,6 +2,7 @@ package com.wuzhizhan.mybatis2.generate.plugin;
 
 import org.mybatis.generator.api.*;
 import org.mybatis.generator.api.dom.java.*;
+import org.mybatis.generator.config.ClientGeneratorConfiguration;
 import org.mybatis.generator.exception.ShellException;
 import org.mybatis.generator.internal.DefaultShellCallback;
 import org.mybatis.generator.internal.util.StringUtility;
@@ -24,20 +25,22 @@ public class CommonDAOInterfacePlugin extends PluginAdapter {
 	private ShellCallback shellCallback = null;
 
 	public CommonDAOInterfacePlugin() {
-		this.shellCallback = new DefaultShellCallback(false);
+		this.shellCallback = new DefaultShellCallback();
 	}
 
 	private boolean isUseExample() {
 		return "true".equals(properties.getProperty("useExample"));
 	}
 
+	/**
+	 * {@inheritDoc} 已存在的公共 DAO 由项目维护，生成时保留。
+	 */
+	@Override
 	public List<GeneratedJavaFile> contextGenerateAdditionalJavaFiles(IntrospectedTable introspectedTable) {
-		boolean hasPk = introspectedTable.hasPrimaryKeyColumns();
-		JavaFormatter javaFormatter = this.context.getJavaFormatter();
-		String daoTargetDir = this.context.getJavaClientGeneratorConfiguration().getTargetProject();
-		String daoTargetPackage = this.context.getJavaClientGeneratorConfiguration().getTargetPackage();
+		ClientGeneratorConfiguration clientConfiguration = context.getClientGeneratorConfiguration().orElseThrow();
+		String daoTargetDir = clientConfiguration.getTargetProject();
+		String daoTargetPackage = clientConfiguration.getTargetPackage();
 		List<GeneratedJavaFile> mapperJavaFiles = new ArrayList<>();
-		String javaFileEncoding = this.context.getProperty("javaFileEncoding");
 		Interface mapperInterface = new Interface(daoTargetPackage + ".MyBatisBaseDao");
 		if (StringUtility.stringHasValue(daoTargetPackage)) {
 			mapperInterface.addImportedType(PARAM_ANNOTATION_TYPE);
@@ -59,14 +62,7 @@ public class CommonDAOInterfacePlugin extends PluginAdapter {
 			if (!this.methods.isEmpty())
 				for (Method method : this.methods)
 					mapperInterface.addMethod(method);
-			List<GeneratedJavaFile> generatedJavaFiles = introspectedTable.getGeneratedJavaFiles();
-			for (GeneratedJavaFile generatedJavaFile : generatedJavaFiles) {
-				CompilationUnit compilationUnit = generatedJavaFile.getCompilationUnit();
-				FullyQualifiedJavaType type = compilationUnit.getType();
-				String modelName = type.getShortName();
-				if (modelName.endsWith("DAO")) ;
-			}
-			GeneratedJavaFile mapperJavafile = new GeneratedJavaFile((CompilationUnit) mapperInterface, daoTargetDir, javaFileEncoding, javaFormatter);
+			GeneratedJavaFile mapperJavafile = new GeneratedJavaFile(mapperInterface, daoTargetDir);
 			try {
 				File mapperDir = this.shellCallback.getDirectory(daoTargetDir, daoTargetPackage);
 				File mapperFile = new File(mapperDir, mapperJavafile.getFileName());
@@ -85,7 +81,7 @@ public class CommonDAOInterfacePlugin extends PluginAdapter {
 		interfaze.addJavaDocLine(" */");
 		String daoSuperClass = interfaze.getType().getPackageName() + ".MyBatisBaseDao";
 		FullyQualifiedJavaType daoSuperType = new FullyQualifiedJavaType(daoSuperClass);
-		String targetPackage = introspectedTable.getContext().getJavaModelGeneratorConfiguration().getTargetPackage();
+		String targetPackage = introspectedTable.getContext().getModelGeneratorConfiguration().getTargetPackage();
 		String domainObjectName = introspectedTable.getTableConfiguration().getDomainObjectName();
 		FullyQualifiedJavaType baseModelJavaType = new FullyQualifiedJavaType(targetPackage + "." + domainObjectName);
 		daoSuperType.addTypeArgument(baseModelJavaType);

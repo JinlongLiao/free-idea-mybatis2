@@ -1,13 +1,14 @@
 package com.wuzhizhan.mybatis2.generate;
 
-import com.google.common.base.Strings;
 import com.intellij.database.model.RawConnectionConfig;
 import com.intellij.database.psi.DbTable;
+import com.intellij.database.util.DasUtil;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.LangDataKeys;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectUtil;
+import com.intellij.openapi.util.io.FileUtil;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.psi.PsiElement;
@@ -18,23 +19,32 @@ import com.wuzhizhan.mybatis2.setting.PersistentConfig;
 import com.wuzhizhan.mybatis2.util.DbToolsUtils;
 import com.wuzhizhan.mybatis2.util.GeneratorCallback;
 import com.wuzhizhan.mybatis2.util.StringUtils;
-import org.mybatis.generator.api.IntellijMyBatisGenerator;
-import org.mybatis.generator.api.ShellCallback;
+
+import org.mybatis.generator.api.MyBatisGenerator;
 import org.mybatis.generator.api.intellij.IntellijTableInfo;
 import org.mybatis.generator.config.*;
-import org.mybatis.generator.internal.DefaultShellCallback;
+import org.mybatis.generator.internal.types.DateForcingJavaTypeResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
+import java.lang.invoke.MethodHandles;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.*;
 
 /**
  * 生成mybatis相关代码
  */
 public class MybatisGenerator {
-	private static final Logger logger = LoggerFactory.getLogger(MybatisGenerator.class);
-	private String currentDbName;
+	/**
+	 * 在生成入口记录失败，保留源表和完整异常堆栈。
+	 */
+	private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+	/**
+	 * IDEA 返回的表模式，未区分模式的数据库可使用目录作为 SQL 前缀。
+	 */
+	private String tableQualifier;
 	private Project project;
 	private PersistentConfig persistentConfig;//持久化的配置
 	private final Config config;//界面默认配置
@@ -63,30 +73,29 @@ public class MybatisGenerator {
 			return result;
 		}
 		PsiElement psiElement = psiElements[0];
-		if (!(psiElement instanceof DbTable)) {
+		if (!(psiElement instanceof DbTable selectedTable)) {
 			result.add("can not generate! \nplease select table");
 			return result;
 		}
 
-		intellijTableInfo = DbToolsUtils.buildIntellijTableInfo((DbTable) psiElement);
+		intellijTableInfo = DbToolsUtils.buildIntellijTableInfo(selectedTable);
+		tableQualifier = DasUtil.getSchema(selectedTable.getDasObject());
+		if (StringUtils.isEmpty(tableQualifier)) {
+			tableQualifier = DasUtil.getCatalog(selectedTable.getDasObject());
+		}
 
-		RawConnectionConfig connectionConfig = ((DbTable) psiElements[0]).getDataSource().getConnectionConfig();
+		RawConnectionConfig connectionConfig = selectedTable.getDataSource().getConnectionConfig();
 
 		String driverClass = connectionConfig.getDriverClass();
 		if (driverClass.contains("mysql")) {
-			currentDbName = ((DbTable) psiElements[0]).getParent().getName();
 			dbType = DbType.MySQL;
 		} else if (driverClass.contains("oracle")) {
-			currentDbName = ((DbTable) psiElements[0]).getParent().getName();
 			dbType = DbType.Oracle;
 		} else if (driverClass.contains("postgresql")) {
-			currentDbName = ((DbTable) psiElements[0]).getParent().getParent().getName();
 			dbType = DbType.PostgreSQL;
 		} else if (driverClass.contains("sqlserver")) {
-			currentDbName = ((DbTable) psiElements[0]).getParent().getName();
 			dbType = DbType.SqlServer;
 		} else if (driverClass.contains("mariadb")) {
-			currentDbName = ((DbTable) psiElements[0]).getParent().getName();
 			dbType = DbType.MariaDB;
 		} else {
 			String failMessage = String.format("db type not support!" +
@@ -102,51 +111,53 @@ public class MybatisGenerator {
 			@Override
 			public void run() {
 
-				Configuration configuration = new Configuration();
-				Context context = new Context(ModelType.CONDITIONAL);
-				configuration.addContext(context);
-
-				context.setId("myid");
-				context.addProperty("autoDelimitKeywords", "true");
-
-				if (DbType.MySQL.equals(dbType) || DbType.MariaDB.equals(dbType)) {
-					// 由于beginningDelimiter和endingDelimiter的默认值为双引号(")，在Mysql中不能这么写，所以还要将这两个默认值改为`
-					context.addProperty("beginningDelimiter", "`");
-					context.addProperty("endingDelimiter", "`");
-				}
-
-				context.addProperty("javaFileEncoding", "UTF-8");
-				context.addProperty(PropertyRegistry.CONTEXT_JAVA_FILE_ENCODING, "UTF-8");
-				context.setTargetRuntime("MyBatis3");
-
-				TableConfiguration tableConfig = buildTableConfig(context);
-				JavaModelGeneratorConfiguration modelConfig = buildModelConfig();
-				SqlMapGeneratorConfiguration mapperConfig = buildMapperXmlConfig();
-				JavaClientGeneratorConfiguration daoConfig = buildDaoConfig();
-				CommentGeneratorConfiguration commentConfig = buildCommentConfig();
-
-				context.addTableConfiguration(tableConfig);
-				context.setJavaModelGeneratorConfiguration(modelConfig);
-				context.setSqlMapGeneratorConfiguration(mapperConfig);
-				context.setJavaClientGeneratorConfiguration(daoConfig);
-				context.setCommentGeneratorConfiguration(commentConfig);
-				addPluginConfiguration(context);
-
-				createFolderForNeed(config);
-				List<String> warnings = new ArrayList<>();
-				ShellCallback shellCallback = new DefaultShellCallback(config.isOverrideJava());
-				Set<String> fullyqualifiedTables = new HashSet<>();
-				Set<String> contexts = new HashSet<>();
+				Path stagedXmlDirectory = null;
 				try {
-					IntellijMyBatisGenerator intellijMyBatisGenerator = new IntellijMyBatisGenerator(configuration, shellCallback, warnings);
-					intellijMyBatisGenerator.generate(new GeneratorCallback(), contexts, fullyqualifiedTables, intellijTableInfo);
-					if (!warnings.isEmpty()) {
-						result.addAll(warnings);
+					Path xmlTargetDirectory = Path.of(config.getProjectFolder(), config.getXmlMvnPath());
+					createFolderForNeed(config);
+					// 暂存 XML，待生成结束并完成合并校验后，再替换目标文件。
+					stagedXmlDirectory = Files.createTempDirectory(xmlTargetDirectory, ".mybatis-");
+					Configuration configuration = new Configuration();
+					Context.Builder context = new Context.Builder()
+						.withId("myid")
+						.withDefaultModelType(ModelType.CONDITIONAL)
+						.withTargetRuntime("MyBatis3")
+						.withProperty(new Property("autoDelimitKeywords", "true"))
+						.withProperty(new Property(PropertyRegistry.CONTEXT_JAVA_FILE_ENCODING, "UTF-8"))
+						.withTableConfiguration(buildTableConfig())
+						.withModelGeneratorConfiguration(buildModelConfig())
+						.withSqlMapGeneratorConfiguration(buildMapperXmlConfig(stagedXmlDirectory))
+						.withClientGeneratorConfiguration(buildDaoConfig())
+						.withCommentGeneratorConfiguration(buildCommentConfig())
+						.withConnectionFactoryConfiguration(new ConnectionFactoryConfiguration.Builder()
+							.withConfigurationType(IdeaTableConnectionFactory.class.getName())
+							.build());
+
+					if (DbType.MySQL.equals(dbType) || DbType.MariaDB.equals(dbType)) {
+						context.withProperty(new Property("beginningDelimiter", "`"));
+						context.withProperty(new Property("endingDelimiter", "`"));
 					}
+					addPluginConfiguration(context);
+					configuration.addContext(context.build());
+
+					MyBatisGenerator generator = new MyBatisGenerator.Builder()
+						.withConfiguration(configuration)
+						.withProgressCallback(new GeneratorCallback())
+						.withOverwriteEnabled(config.isOverrideJava())
+						.build();
+					result.addAll(IdeaTableConnectionFactory.generateMapperFiles(generator, intellijTableInfo));
+					MapperXmlPublisher.publishMapperXml(generator.getGeneratedXmlFiles(), stagedXmlDirectory,
+						xmlTargetDirectory, config.isOverrideXML());
 				} catch (Exception e) {
-					e.printStackTrace();
+					log.error("MyBatis 生成失败，table={}, model={}, mapper={}, result={}",
+						config.getTableName(), config.getModelName(), config.getDaoName(), result, e);
 					Messages.showMessageDialog(e.getMessage(), "MybatisGenerator Failure", Messages.getErrorIcon());
 					result.add(e.getMessage());
+				} finally {
+					if (Objects.nonNull(stagedXmlDirectory) && !FileUtil.delete(stagedXmlDirectory.toFile())) {
+						log.warn("MyBatis 生成结束后无法清理临时 XML 目录，table={}, directory={}",
+							config.getTableName(), stagedXmlDirectory);
+					}
 				}
 				// project.getBaseDir().refresh(true, true);
 				// project.getBaseDir().refresh(false, true);
@@ -214,63 +225,37 @@ public class MybatisGenerator {
 	/**
 	 * 生成table配置
 	 */
-	private TableConfiguration buildTableConfig(Context context) {
-		TableConfiguration tableConfig = new TableConfiguration(context);
-		tableConfig.setTableName(config.getTableName());
-		tableConfig.setDomainObjectName(config.getModelName());
-		String schema;
-		if (!Strings.isNullOrEmpty(currentDbName)) {
-			schema = currentDbName;
-		} else {
-			throw new RuntimeException("can not find schema");
-
-		}
-		if (dbType.equals(DbType.MySQL)
-			|| dbType.equals(DbType.MariaDB)
-			|| dbType.equals(DbType.PostgreSQL)) {
-			tableConfig.setSchema(schema);
-		} else {
-			tableConfig.setCatalog(schema);
+	private TableConfiguration buildTableConfig() {
+		TableConfiguration.Builder tableConfig = new TableConfiguration.Builder();
+		tableConfig.withTableName(config.getTableName());
+		tableConfig.withDomainObjectName(config.getModelName());
+		// 从 IDEA 读取实际模式，只有启用前缀时才将其写入生成的 SQL。
+		if (config.isUseSchemaPrefix() && !StringUtils.isEmpty(tableQualifier)) {
+			tableConfig.withSchema(tableQualifier);
 		}
 
 		if (!config.isUseExample()) {
-			tableConfig.setUpdateByExampleStatementEnabled(false);
-			tableConfig.setCountByExampleStatementEnabled(false);
-			tableConfig.setDeleteByExampleStatementEnabled(false);
-			tableConfig.setSelectByExampleStatementEnabled(false);
-		}
-		if (config.isUseSchemaPrefix()) {
-			if (DbType.MySQL.equals(dbType)) {
-				tableConfig.setSchema(schema);
-			} else if (DbType.Oracle.equals(dbType)) {
-				tableConfig.setSchema(schema);
-			} else {
-				tableConfig.setCatalog(schema);
-			}
+			tableConfig.withUpdateByExampleStatementEnabled(false);
+			tableConfig.withCountByExampleStatementEnabled(false);
+			tableConfig.withDeleteByExampleStatementEnabled(false);
+			tableConfig.withSelectByExampleStatementEnabled(false);
 		}
 
 		if (DbType.PostgreSQL.equals(dbType)) {
-			tableConfig.setDelimitIdentifiers(true);
+			tableConfig.withDelimitIdentifiers(true);
 		}
 
 		if (!StringUtils.isEmpty(config.getPrimaryKey())) {
-			if (DbType.MySQL.equals(dbType) || DbType.MariaDB.equals(dbType)) {
-				//dbType为JDBC，且配置中开启useGeneratedKeys时，Mybatis会使用Jdbc3KeyGenerator,
-				//使用该KeyGenerator的好处就是直接在一次INSERT 语句内，通过resultSet获取得到 生成的主键值，
-				//并很好的支持设置了读写分离代理的数据库
-				//例如阿里云RDS + 读写分离代理 无需指定主库
-				//当使用SelectKey时，Mybatis会使用SelectKeyGenerator，INSERT之后，多发送一次查询语句，获得主键值
-				//在上述读写分离被代理的情况下，会得不到正确的主键
-			}
-			tableConfig.setGeneratedKey(new GeneratedKey(config.getPrimaryKey(), "JDBC", true, null));
+			// 通过 JDBC getGeneratedKeys 回填主键，避免额外执行 SelectKey。
+			tableConfig.withGeneratedKey(new GeneratedKey(config.getPrimaryKey(), "JDBC", true));
 		}
 
 		if (config.isUseActualColumnNames()) {
-			tableConfig.addProperty("useActualColumnNames", "true");
+			tableConfig.withProperty(new Property("useActualColumnNames", "true"));
 		}
 
 		if (config.isUseTableNameAlias()) {
-			tableConfig.setAlias(config.getTableName());
+			tableConfig.withAlias(config.getTableName());
 		}
 
 //        if (ignoredColumns != null) {
@@ -287,8 +272,8 @@ public class MybatisGenerator {
 //            }
 //        }
 
-		tableConfig.setMapperName(config.getDaoName());
-		return tableConfig;
+		tableConfig.withMapperName(config.getDaoName());
+		return tableConfig.build();
 	}
 
 
@@ -297,63 +282,40 @@ public class MybatisGenerator {
 	 *
 	 * @return
 	 */
-	private JavaModelGeneratorConfiguration buildModelConfig() {
+	private ModelGeneratorConfiguration buildModelConfig() {
 		String projectFolder = config.getProjectFolder();
 		String modelPackage = config.getModelPackage();
 		String modelPackageTargetFolder = config.getModelTargetFolder();
 		String modelMvnPath = config.getModelMvnPath();
 
-		JavaModelGeneratorConfiguration modelConfig = new JavaModelGeneratorConfiguration();
+		ModelGeneratorConfiguration.Builder modelConfig = new ModelGeneratorConfiguration.Builder();
 
 		if (!StringUtils.isEmpty(modelPackage)) {
-			modelConfig.setTargetPackage(modelPackage);
+			modelConfig.withTargetPackage(modelPackage);
 		} else {
-			modelConfig.setTargetPackage("generator");
+			modelConfig.withTargetPackage("generator");
 		}
 
 		if (!StringUtils.isEmpty(modelPackageTargetFolder)) {
-			modelConfig.setTargetProject(modelPackageTargetFolder + "/" + modelMvnPath + "/");
+			modelConfig.withTargetProject(modelPackageTargetFolder + "/" + modelMvnPath + "/");
 		} else {
-			modelConfig.setTargetProject(projectFolder + "/" + modelMvnPath + "/");
+			modelConfig.withTargetProject(projectFolder + "/" + modelMvnPath + "/");
 		}
-		return modelConfig;
+		return modelConfig.build();
 	}
 
 	/**
-	 * 生成mapper.xml文件配置
+	 * 构建本次生成使用的 Mapper XML 暂存配置。
 	 *
-	 * @return
+	 * @param targetDirectory 本次生成的 XML 输出根目录
+	 * @return XML 包名和输出目录配置
 	 */
-	private SqlMapGeneratorConfiguration buildMapperXmlConfig() {
-
-		String projectFolder = config.getProjectFolder();
-		String mappingXMLPackage = config.getXmlPackage();
-		String mappingXMLTargetFolder = config.getProjectFolder();
-		String xmlMvnPath = config.getXmlMvnPath();
-
-		SqlMapGeneratorConfiguration mapperConfig = new SqlMapGeneratorConfiguration();
-
-		if (!StringUtils.isEmpty(mappingXMLPackage)) {
-			mapperConfig.setTargetPackage(mappingXMLPackage);
-		} else {
-			mapperConfig.setTargetPackage("generator");
-		}
-
-		if (!StringUtils.isEmpty(mappingXMLTargetFolder)) {
-			mapperConfig.setTargetProject(mappingXMLTargetFolder + "/" + xmlMvnPath + "/");
-		} else {
-			mapperConfig.setTargetProject(projectFolder + "/" + xmlMvnPath + "/");
-		}
-
-		if (config.isOverrideXML()) {//14
-			String mappingXMLFilePath = getMappingXMLFilePath(config);
-			File mappingXMLFile = new File(mappingXMLFilePath);
-			if (mappingXMLFile.exists()) {
-				mappingXMLFile.delete();
-			}
-		}
-
-		return mapperConfig;
+	private SqlMapGeneratorConfiguration buildMapperXmlConfig(Path targetDirectory) {
+		String xmlPackage = config.getXmlPackage();
+		return new SqlMapGeneratorConfiguration.Builder()
+			.withTargetPackage(StringUtils.isEmpty(xmlPackage) ? "generator" : xmlPackage)
+			.withTargetProject(targetDirectory.toString())
+			.build();
 	}
 
 	/**
@@ -361,30 +323,29 @@ public class MybatisGenerator {
 	 *
 	 * @return
 	 */
-	private JavaClientGeneratorConfiguration buildDaoConfig() {
+	private ClientGeneratorConfiguration buildDaoConfig() {
 
 		String projectFolder = config.getProjectFolder();
 		String daoPackage = config.getDaoPackage();
 		String daoTargetFolder = config.getDaoTargetFolder();
 		String daoMvnPath = config.getDaoMvnPath();
 
-		JavaClientGeneratorConfiguration daoConfig = new JavaClientGeneratorConfiguration();
-		daoConfig.setConfigurationType("XMLMAPPER");
-		daoConfig.setTargetPackage(daoPackage);
+		ClientGeneratorConfiguration.Builder daoConfig = new ClientGeneratorConfiguration.Builder();
+		daoConfig.withLegacyClientType(ClientGeneratorConfiguration.LegacyClientType.XML_MAPPER);
 
 		if (!StringUtils.isEmpty(daoPackage)) {
-			daoConfig.setTargetPackage(daoPackage);
+			daoConfig.withTargetPackage(daoPackage);
 		} else {
-			daoConfig.setTargetPackage("generator");
+			daoConfig.withTargetPackage("generator");
 		}
 
 		if (!StringUtils.isEmpty(daoTargetFolder)) {
-			daoConfig.setTargetProject(daoTargetFolder + "/" + daoMvnPath + "/");
+			daoConfig.withTargetProject(daoTargetFolder + "/" + daoMvnPath + "/");
 		} else {
-			daoConfig.setTargetProject(projectFolder + "/" + daoMvnPath + "/");
+			daoConfig.withTargetProject(projectFolder + "/" + daoMvnPath + "/");
 		}
 
-		return daoConfig;
+		return daoConfig.build();
 	}
 
 	/**
@@ -393,128 +354,62 @@ public class MybatisGenerator {
 	 * @return
 	 */
 	private CommentGeneratorConfiguration buildCommentConfig() {
-		CommentGeneratorConfiguration commentConfig = new CommentGeneratorConfiguration();
-		commentConfig.setConfigurationType(DbRemarksCommentGenerator.class.getName());
+		CommentGeneratorConfiguration.Builder commentConfig = new CommentGeneratorConfiguration.Builder();
+		commentConfig.withConfigurationType(DbRemarksCommentGenerator.class.getName());
 
-		if (config.isComment()) {
-			commentConfig.addProperty("columnRemarks", "true");
-		}
 		if (config.isAnnotation()) {
-			commentConfig.addProperty("annotations", "true");
+			commentConfig.withProperty(new Property("annotations", "true"));
 		}
 
-		return commentConfig;
+		return commentConfig.build();
 	}
 
 	/**
-	 * 添加相关插件（注意插件文件需要通过jar引入）
+	 * 保留各生成选项及扩展执行顺序。未开启 JSR-310 时继续使用旧版日期类型。
+	 *
+	 * @param context 当前生成器的上下文配置
 	 */
-	private void addPluginConfiguration(Context context) {
-		//实体添加序列化
-		PluginConfiguration serializablePlugin = new PluginConfiguration();
-		serializablePlugin.addProperty("type", "org.mybatis.generator.plugins.SerializablePlugin");
-		serializablePlugin.setConfigurationType("org.mybatis.generator.plugins.SerializablePlugin");
-		context.addPluginConfiguration(serializablePlugin);
-
-
+	private void addPluginConfiguration(Context.Builder context) {
+		addGeneratorPlugin(context, "org.mybatis.generator.plugins.SerializablePlugin");
 		if (config.isNeedToStringHashcodeEquals()) {
-			PluginConfiguration equalsHashCodePlugin = new PluginConfiguration();
-			equalsHashCodePlugin.addProperty("type", "org.mybatis.generator.plugins.EqualsHashCodePlugin");
-			equalsHashCodePlugin.setConfigurationType("org.mybatis.generator.plugins.EqualsHashCodePlugin");
-			context.addPluginConfiguration(equalsHashCodePlugin);
-			PluginConfiguration toStringPluginPlugin = new PluginConfiguration();
-			toStringPluginPlugin.addProperty("type", "org.mybatis.generator.plugins.ToStringPlugin");
-			toStringPluginPlugin.setConfigurationType("org.mybatis.generator.plugins.ToStringPlugin");
-			context.addPluginConfiguration(toStringPluginPlugin);
+			addGeneratorPlugin(context, "org.mybatis.generator.plugins.EqualsHashCodePlugin");
+			addGeneratorPlugin(context, "org.mybatis.generator.plugins.ToStringPlugin");
 		}
 
-		// limit/offset插件
-		if (config.isOffsetLimit()) {
-			if (DbType.MySQL.equals(dbType) || DbType.PostgreSQL.equals(dbType)) {
-				PluginConfiguration mySQLLimitPlugin = new PluginConfiguration();
-				String pluginClassName = MySQLLimitPlugin.class.getName();
-				mySQLLimitPlugin.addProperty("type", pluginClassName);
-				mySQLLimitPlugin.setConfigurationType(pluginClassName);
-				context.addPluginConfiguration(mySQLLimitPlugin);
-			}
+		boolean supportsSqlExtensions = DbType.MySQL.equals(dbType) || DbType.PostgreSQL.equals(dbType);
+		if (config.isOffsetLimit() && supportsSqlExtensions) {
+			addGeneratorPlugin(context, MySQLLimitPlugin.class.getName());
 		}
-
-		//for JSR310
-		if (config.isJsr310Support()) {
-			JavaTypeResolverConfiguration javaTypeResolverPlugin = new JavaTypeResolverConfiguration();
-			javaTypeResolverPlugin.setConfigurationType(JavaTypeResolverJsr310Impl.class.getName());
-			context.setJavaTypeResolverConfiguration(javaTypeResolverPlugin);
+		if (!config.isJsr310Support()) {
+			context.withJavaTypeResolverConfiguration(new JavaTypeResolverConfiguration.Builder()
+				.withConfigurationType(DateForcingJavaTypeResolver.class.getName()).build());
 		}
-
-		//forUpdate 插件
-		if (config.isNeedForUpdate()) {
-			if (DbType.MySQL.equals(dbType) || DbType.PostgreSQL.equals(dbType)) {
-				PluginConfiguration mySQLForUpdatePlugin = new PluginConfiguration();
-				String pluginClassName = MySQLForUpdatePlugin.class.getName();
-				mySQLForUpdatePlugin.addProperty("type", pluginClassName);
-				mySQLForUpdatePlugin.setConfigurationType(pluginClassName);
-				context.addPluginConfiguration(mySQLForUpdatePlugin);
-			}
+		if (config.isNeedForUpdate() && supportsSqlExtensions) {
+			addGeneratorPlugin(context, MySQLForUpdatePlugin.class.getName());
 		}
-
-		//repository 插件
-		if (config.isAnnotationDAO()) {
-			if (DbType.MySQL.equals(dbType) || DbType.PostgreSQL.equals(dbType)) {
-				PluginConfiguration repositoryPlugin = new PluginConfiguration();
-				String pluginClassName = RepositoryPlugin.class.getName();
-				repositoryPlugin.addProperty("type", pluginClassName);
-				repositoryPlugin.setConfigurationType(pluginClassName);
-				context.addPluginConfiguration(repositoryPlugin);
-			}
+		if (config.isAnnotationDAO() && supportsSqlExtensions) {
+			addGeneratorPlugin(context, RepositoryPlugin.class.getName());
 		}
-
-		if (config.isUseDAOExtendStyle()) {//13
-			if (DbType.MySQL.equals(dbType) || DbType.PostgreSQL.equals(dbType)) {
-				PluginConfiguration commonDAOInterfacePlugin = new PluginConfiguration();
-				String pluginClassName = CommonDAOInterfacePlugin.class.getName();
-				commonDAOInterfacePlugin.addProperty("type", pluginClassName);
-				commonDAOInterfacePlugin.setConfigurationType(pluginClassName);
-				context.addPluginConfiguration(commonDAOInterfacePlugin);
-			}
+		if (config.isUseDAOExtendStyle() && supportsSqlExtensions) {
+			addGeneratorPlugin(context, CommonDAOInterfacePlugin.class.getName());
 		}
-		// Lombok 插件
 		if (config.isUseLombokPlugin()) {
-			PluginConfiguration pluginConfiguration = new PluginConfiguration();
-			String pluginClassName = LombokPlugin.class.getName();
-			pluginConfiguration.addProperty("type", pluginClassName);
-			pluginConfiguration.setConfigurationType(pluginClassName);
-			context.addPluginConfiguration(pluginConfiguration);
+			addGeneratorPlugin(context, LombokPlugin.class.getName());
 		}
-		// Swagger 插件
 		if (config.isUseSwaggerPlugin()) {
-			PluginConfiguration pluginConfiguration = new PluginConfiguration();
-			String pluginClassName = GeneratorSwagger2DocPlugin.class.getName();
-			pluginConfiguration.addProperty("type", pluginClassName);
-			pluginConfiguration.setConfigurationType(pluginClassName);
-			context.addPluginConfiguration(pluginConfiguration);
+			addGeneratorPlugin(context, GeneratorSwagger2DocPlugin.class.getName());
 		}
-
 	}
 
 	/**
-	 * 获取xml文件路径 用以删除之前的xml
+	 * 按注册顺序附加一个生成插件。
+	 *
+	 * @param context         当前生成器的上下文配置
+	 * @param pluginClassName 生成插件类的全限定名
 	 */
-	private String getMappingXMLFilePath(Config config) {
-		StringBuilder sb = new StringBuilder();
-		String mappingXMLPackage = config.getXmlPackage();
-		String mappingXMLTargetFolder = config.getProjectFolder();
-		String xmlMvnPath = config.getXmlMvnPath();
-		sb.append(mappingXMLTargetFolder).append("/").append(xmlMvnPath).append("/");
-
-		if (!StringUtils.isEmpty(mappingXMLPackage)) {
-			sb.append(mappingXMLPackage.replace(".", "/")).append("/");
-		}
-		if (!StringUtils.isEmpty(config.getDaoName())) {
-			sb.append(config.getDaoName()).append(".xml");
-		} else {
-			sb.append(config.getModelName()).append("Dao.xml");
-		}
-
-		return sb.toString();
+	private void addGeneratorPlugin(Context.Builder context, String pluginClassName) {
+		context.withPluginConfiguration(new PluginConfiguration.Builder()
+			.withConfigurationType(pluginClassName).build());
 	}
+
 }
