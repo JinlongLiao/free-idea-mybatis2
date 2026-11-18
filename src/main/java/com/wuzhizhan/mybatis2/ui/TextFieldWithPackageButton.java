@@ -7,7 +7,7 @@ import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.ui.TextAccessor;
 import com.intellij.ui.components.JBTextField;
 import com.intellij.ui.components.fields.ExtendableTextField;
-import com.intellij.util.ui.UIUtil;
+import com.intellij.util.ui.SwingUndoUtil;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -30,7 +30,7 @@ public class TextFieldWithPackageButton extends ComponentWithBrowseButton<JTextF
     public TextFieldWithPackageButton(JTextField field, @Nullable ActionListener actionListener, @Nullable Disposable parent) {
         super(field, actionListener);
         if (!(field instanceof JBTextField)) {
-            UIUtil.addUndoRedoActions(field);
+            SwingUndoUtil.addUndoRedoActions(field);
         }
         addActionListener(actionListener);
     }

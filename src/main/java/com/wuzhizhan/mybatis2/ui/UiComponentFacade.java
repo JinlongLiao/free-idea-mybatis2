@@ -116,7 +116,7 @@ public final class UiComponentFacade {
                     listener.selected(list.getSelectedIndex());
                 }
             };
-            builder.setItemChoosenCallback(new Runnable() {
+            builder.setItemChosenCallback(new Runnable() {
                 @Override
                 public void run() {
                     setActionForExecutableListener(runnable, listener);

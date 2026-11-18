@@ -1,12 +1,10 @@
 package com.wuzhizhan.mybatis2.dom.description;
 
-import com.intellij.openapi.module.Module;
 import com.intellij.psi.xml.XmlFile;
 import com.intellij.util.xml.DomFileDescription;
 import com.wuzhizhan.mybatis2.dom.model.Mapper;
 import com.wuzhizhan.mybatis2.util.DomUtils;
 import org.jetbrains.annotations.NotNull;
-import org.jetbrains.annotations.Nullable;
 
 /**
  * @author yanglin
@@ -17,8 +15,9 @@ public class MapperDescription extends DomFileDescription<Mapper> {
         super(Mapper.class, "mapper");
     }
 
+    /** {@inheritDoc} 始终按 MyBatis 文件声明识别 XML。 */
     @Override
-    public boolean isMyFile(@NotNull XmlFile file, @Nullable Module module) {
+    public boolean isMyFile(@NotNull XmlFile file) {
         return DomUtils.isMybatisFile(file);
     }
 

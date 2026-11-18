@@ -39,10 +39,6 @@ public class AnnotationAliasResolver extends AliasResolver {
         super(project);
     }
 
-    public static final AnnotationAliasResolver getInstance(@NotNull Project project) {
-        return project.getComponent(AnnotationAliasResolver.class);
-    }
-
     @NotNull
     @Override
     public Set<AliasDesc> getClassAliasDescriptions(@Nullable PsiElement element) {
