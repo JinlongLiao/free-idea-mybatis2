@@ -2,94 +2,116 @@ package org.mybatis.generator.api.intellij;
 
 /* loaded from: mybatis-generator-core-1.4.0.jar:org/mybatis/generator/api/intellij/IntellijColumnInfo.class */
 public class IntellijColumnInfo {
-    private String name;
-    private int dataType;
-    private boolean generatedColumn;
-    private boolean autoIncrement;
-    private int size;
-    private int decimalDigits;
-    private String remarks;
-    private String columnDefaultValue;
-    private Boolean nullable;
-    private short keySeq;
+	private String name;
+	private int dataType;
+	/**
+	 * JDBC 驱动报告的原始类型名，供跨表显示和结构比较。
+	 */
+	private String typeName;
+	private boolean generatedColumn;
+	private boolean autoIncrement;
+	private int size;
+	private int decimalDigits;
+	private String remarks;
+	private String columnDefaultValue;
+	private Boolean nullable;
+	private short keySeq;
 
-    public String getName() {
-        return this.name;
-    }
+	public String getName() {
+		return this.name;
+	}
 
-    public void setName(String name) {
-        this.name = name;
-    }
+	public void setName(String name) {
+		this.name = name;
+	}
 
-    public int getDataType() {
-        return this.dataType;
-    }
+	public int getDataType() {
+		return this.dataType;
+	}
 
-    public void setDataType(int dataType) {
-        this.dataType = dataType;
-    }
+	public void setDataType(int dataType) {
+		this.dataType = dataType;
+	}
 
-    public boolean isGeneratedColumn() {
-        return this.generatedColumn;
-    }
+	/**
+	 * 返回原始数据库类型名，旧的 IDEA 快照可能没有此值。
+	 *
+	 * @return JDBC 类型名，可以为空
+	 */
+	public String getTypeName() {
+		return typeName;
+	}
 
-    public void setGeneratedColumn(boolean generatedColumn) {
-        this.generatedColumn = generatedColumn;
-    }
+	/**
+	 * 记录 JDBC 驱动报告的原始类型名。
+	 *
+	 * @param typeName 数据库原始类型名
+	 */
+	public void setTypeName(String typeName) {
+		this.typeName = typeName;
+	}
 
-    public boolean isAutoIncrement() {
-        return this.autoIncrement;
-    }
+	public boolean isGeneratedColumn() {
+		return this.generatedColumn;
+	}
 
-    public void setAutoIncrement(boolean autoIncrement) {
-        this.autoIncrement = autoIncrement;
-    }
+	public void setGeneratedColumn(boolean generatedColumn) {
+		this.generatedColumn = generatedColumn;
+	}
 
-    public int getSize() {
-        return this.size;
-    }
+	public boolean isAutoIncrement() {
+		return this.autoIncrement;
+	}
 
-    public void setSize(int size) {
-        this.size = size;
-    }
+	public void setAutoIncrement(boolean autoIncrement) {
+		this.autoIncrement = autoIncrement;
+	}
 
-    public int getDecimalDigits() {
-        return this.decimalDigits;
-    }
+	public int getSize() {
+		return this.size;
+	}
 
-    public void setDecimalDigits(int decimalDigits) {
-        this.decimalDigits = decimalDigits;
-    }
+	public void setSize(int size) {
+		this.size = size;
+	}
 
-    public String getRemarks() {
-        return this.remarks;
-    }
+	public int getDecimalDigits() {
+		return this.decimalDigits;
+	}
 
-    public void setRemarks(String remarks) {
-        this.remarks = remarks;
-    }
+	public void setDecimalDigits(int decimalDigits) {
+		this.decimalDigits = decimalDigits;
+	}
 
-    public String getColumnDefaultValue() {
-        return this.columnDefaultValue;
-    }
+	public String getRemarks() {
+		return this.remarks;
+	}
 
-    public void setColumnDefaultValue(String columnDefaultValue) {
-        this.columnDefaultValue = columnDefaultValue;
-    }
+	public void setRemarks(String remarks) {
+		this.remarks = remarks;
+	}
 
-    public Boolean getNullable() {
-        return this.nullable;
-    }
+	public String getColumnDefaultValue() {
+		return this.columnDefaultValue;
+	}
 
-    public void setNullable(Boolean nullable) {
-        this.nullable = nullable;
-    }
+	public void setColumnDefaultValue(String columnDefaultValue) {
+		this.columnDefaultValue = columnDefaultValue;
+	}
 
-    public short getKeySeq() {
-        return this.keySeq;
-    }
+	public Boolean getNullable() {
+		return this.nullable;
+	}
 
-    public void setKeySeq(short keySeq) {
-        this.keySeq = keySeq;
-    }
+	public void setNullable(Boolean nullable) {
+		this.nullable = nullable;
+	}
+
+	public short getKeySeq() {
+		return this.keySeq;
+	}
+
+	public void setKeySeq(short keySeq) {
+		this.keySeq = keySeq;
+	}
 }

@@ -1,1 +1,1 @@
-rootProject.name = "free-idea-mybatis2"
+rootProject.name = "mybatis-workbench"

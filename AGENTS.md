@@ -3,7 +3,7 @@
 ## 项目结构
 
 - 单模块 IntelliJ IDEA 插件，使用 Java 和 Gradle Kotlin DSL。SDK、第三方依赖和 Java 工具链集中在 `build.gradle.kts`，Wrapper 版本由 `gradle/wrapper/gradle-wrapper.properties` 管理。
-- `src/main/java/com/wuzhizhan/mybatis2/` 下的 `dom`、`provider`、`reference`、`inspection` 等包负责 XML 解析、导航、引用和检查；`action`、`ui`、`setting`、`generate` 负责生成器入口、配置和生成。
+- `src/main/java/io/github/jinlongliao/mybatis/workbench/` 下的 `dom`、`provider`、`reference`、`inspection` 等包负责 XML 解析、导航、引用和检查；`action`、`ui`、`setting`、`generate` 负责生成器入口、配置和生成。
 - `generate/IdeaTableConnectionFactory.java` 将 IDEA 表结构提供给 MyBatis Generator。`src/main/java/org/mybatis/generator/api/intellij/` 保存表及列快照。升级生成器时核对 JDBC 元数据契约、生成回调、XML 合并和覆盖写入。
 - `src/main/resources/META-INF/plugin.xml` 注册扩展、服务、动作和插件运行时依赖。图标、模板和其他打包资源位于 `src/main/resources/`。
 

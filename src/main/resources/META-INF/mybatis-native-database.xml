@@ -1,0 +1,11 @@
+<idea-plugin>
+    <extensions defaultExtensionNs="com.intellij">
+        <projectService serviceImplementation="io.github.jinlongliao.mybatis.workbench.service.TableInfoService"/>
+    </extensions>
+
+    <actions resource-bundle="messages.WorkbenchBundle">
+        <action id="free-mabatis-generate-action" class="io.github.jinlongliao.mybatis.workbench.action.MybatisGeneratorMainAction">
+            <add-to-group group-id="DatabaseViewPopupMenu" anchor="first"/>
+        </action>
+    </actions>
+</idea-plugin>

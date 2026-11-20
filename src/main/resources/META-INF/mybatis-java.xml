@@ -1,0 +1,52 @@
+<idea-plugin>
+    <extensions defaultExtensionNs="com.intellij">
+        <dom.fileMetaData implementation="io.github.jinlongliao.mybatis.workbench.dom.description.MapperDescription"
+                          rootTagName="mapper"/>
+        <dom.fileMetaData implementation="io.github.jinlongliao.mybatis.workbench.dom.description.ConfigurationDescription"
+                          rootTagName="configuration"/>
+        <definitionsScopedSearch implementation="io.github.jinlongliao.mybatis.workbench.definitionsearch.MapperDefinitionSearch"/>
+        <projectService serviceImplementation="io.github.jinlongliao.mybatis.workbench.service.JavaService"/>
+        <projectService serviceImplementation="io.github.jinlongliao.mybatis.workbench.service.AnnotationService"/>
+        <projectService serviceImplementation="io.github.jinlongliao.mybatis.workbench.service.EditorService"/>
+        <projectService serviceImplementation="io.github.jinlongliao.mybatis.workbench.alias.AliasFacade"/>
+        <projectService serviceImplementation="io.github.jinlongliao.mybatis.workbench.locator.MapperLocator"/>
+        <codeInsight.lineMarkerProvider language="XML"
+                                        implementationClass="io.github.jinlongliao.mybatis.workbench.provider.StatementLineMarkerProvider"/>
+        <codeInsight.lineMarkerProvider language="UAST"
+                                        implementationClass="io.github.jinlongliao.mybatis.workbench.provider.MapperLineMarkerProvider"/>
+        <codeInsight.lineMarkerProvider language="UAST"
+                                        implementationClass="io.github.jinlongliao.mybatis.workbench.provider.InjectionLineMarkerProvider"/>
+        <applicationConfigurable groupId="tools" instance="io.github.jinlongliao.mybatis.workbench.setting.MybatisConfigurable"/>
+        <applicationService serviceImplementation="io.github.jinlongliao.mybatis.workbench.setting.MybatisSetting"/>
+        <completion.contributor language="JAVA"
+                                implementationClass="io.github.jinlongliao.mybatis.workbench.contributor.JavaMenthodCompletionContributor"/>
+        <completion.contributor language="XML"
+                                implementationClass="io.github.jinlongliao.mybatis.workbench.contributor.TestParamContributor"/>
+        <completion.contributor language="SQL"
+                                implementationClass="io.github.jinlongliao.mybatis.workbench.contributor.SqlParamCompletionContributor"
+                                order="first"/>
+        <fileTemplateGroup implementation="io.github.jinlongliao.mybatis.workbench.template.MybatisFileTemplateDescriptorFactory"/>
+        <typedHandler implementation="io.github.jinlongliao.mybatis.workbench.action.MybatisTypedHandler" id="mybatis" order="first"/>
+        <defaultLiveTemplates file="/liveTemplates/sql.xml"/>
+        <refactoring.elementListenerProvider
+                implementation="io.github.jinlongliao.mybatis.workbench.refactoring.MapperRefactoringProvider"/>
+        <localInspection language="JAVA" shortName="MybatisMapperMethodInspection"
+                         displayName="Mapper method inspection" groupName="Mybatis" enabledByDefault="true"
+                         level="ERROR" implementationClass="io.github.jinlongliao.mybatis.workbench.inspection.MapperMethodInspection"/>
+        <localInspection language="XML" shortName="MybatisMapperXmlInspection" enabledByDefault="true" level="ERROR"
+                         displayName="Mapper xml inspection" groupName="Mybatis"
+                         implementationClass="io.github.jinlongliao.mybatis.workbench.inspection.MapperXmlInspection"/>
+        <intentionAction>
+            <className>io.github.jinlongliao.mybatis.workbench.intention.GenerateParamAnnotationIntention</className>
+        </intentionAction>
+        <intentionAction>
+            <className>io.github.jinlongliao.mybatis.workbench.intention.GenerateStatementIntention</className>
+        </intentionAction>
+        <intentionAction order="first">
+            <className>io.github.jinlongliao.mybatis.workbench.intention.GenerateMapperIntention</className>
+        </intentionAction>
+        <projectService serviceImplementation="io.github.jinlongliao.mybatis.workbench.setting.PersistentConfig"/>
+        <projectConfigurable groupId="tools" displayName="Mybatis Generator Setting" id="free.mybatis.gene.id"
+                             instance="io.github.jinlongliao.mybatis.workbench.setting.MybatisGeneratorConfigurable"/>
+    </extensions>
+</idea-plugin>

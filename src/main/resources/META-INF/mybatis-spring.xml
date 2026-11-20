@@ -1,0 +1,7 @@
+<idea-plugin>
+    <extensions defaultExtensionNs="com.intellij">
+        <projectService serviceInterface="io.github.jinlongliao.mybatis.workbench.alias.AliasResolver"
+                        serviceImplementation="io.github.jinlongliao.mybatis.workbench.alias.BeanAliasResolver"/>
+        <spring.customLocalComponentsDiscoverer implementation="io.github.jinlongliao.mybatis.workbench.locator.MapperBeanProvider"/>
+    </extensions>
+</idea-plugin>
