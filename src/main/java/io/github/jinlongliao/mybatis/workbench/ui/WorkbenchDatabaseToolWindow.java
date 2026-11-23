@@ -1,11 +1,10 @@
 package io.github.jinlongliao.mybatis.workbench.ui;
 
-import com.intellij.ide.plugins.PluginManagerCore;
-import com.intellij.ide.plugins.PluginModuleId;
 import com.intellij.openapi.project.DumbAware;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.wm.ToolWindow;
 import com.intellij.openapi.wm.ToolWindowFactory;
+import com.intellij.openapi.wm.ToolWindowEP;
 import com.intellij.ui.content.Content;
 
 import org.jetbrains.annotations.NotNull;
@@ -24,18 +23,21 @@ import io.github.jinlongliao.mybatis.workbench.setting.MybatisSetting;
  */
 public final class WorkbenchDatabaseToolWindow implements ToolWindowFactory, DumbAware {
 	/**
-	 * 原生数据库的专业能力模块，仅加载基础数据库插件时不会启用。
+	 * Database Tools 的专业模块声明的窗口 ID。扩展注册表在窗口实例化前已可读取，
+	 * 因此首次创建项目时也能判断，且无需加载 Database Tools 的实现类。
 	 */
-	private static final PluginModuleId NATIVE_DATABASE_PRO =
-		PluginModuleId.getId("intellij.database.pro", PluginModuleId.JETBRAINS_NAMESPACE);
+	private static final String NATIVE_DATABASE_PRO_WINDOW_ID = "Database Changes";
 
 	/**
-	 * 返回宿主的原生专业数据库模块是否已实际启用。
+	 * 检查 Database Tools 是否已注册专业数据库窗口扩展。
 	 *
-	 * @return 已启用原生专业数据库模块时为 true
+	 * @return 专业数据库窗口扩展可用时为 true
+	 * @see <a href="https://plugins.jetbrains.com/docs/intellij/tool-windows.html">IntelliJ Platform Tool Windows</a>
 	 */
 	public static boolean isNativeDatabaseAvailable() {
-		return PluginManagerCore.getPluginSet().isModuleEnabled(NATIVE_DATABASE_PRO);
+		return ToolWindowEP.EP_NAME.getExtensionList().stream()
+			.anyMatch(window -> NATIVE_DATABASE_PRO_WINDOW_ID.equals(window.id)
+				&& "com.intellij.database".equals(window.getPluginDescriptor().getPluginId().getIdString()));
 	}
 
 	/**

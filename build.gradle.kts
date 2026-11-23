@@ -75,6 +75,8 @@ dependencies {
 	}
 }
 
+val platform262Only = providers.gradleProperty("workbenchPlatform262Only").map(String::toBoolean).orElse(false)
+
 intellijPlatform {
 	// 构建插件 ZIP 时跳过设置搜索索引及其打包任务。
 	buildSearchableOptions = false
@@ -82,7 +84,26 @@ intellijPlatform {
 	pluginConfiguration {
 		ideaVersion {
 			sinceBuild = "262"
+			if (platform262Only.get()) {
+				untilBuild = "262.*"
+			}
 		}
+	}
+}
+
+// 262 的 XML PSI 已在平台中。专用 ZIP 保留 262 兼容范围，并移除只在 263 存在的插件依赖。
+if (platform262Only.get()) {
+	tasks.patchPluginXml {
+		doLast {
+			val descriptor = outputFile.get().asFile
+			val xml = descriptor.readText()
+			val xmlPluginDependency = """<depends optional="true" config-file="mybatis-xml.xml">com.intellij.xml</depends>"""
+			check(xmlPluginDependency in xml) { "未找到需要从 262 插件包移除的独立 XML 插件依赖" }
+			descriptor.writeText(xml.replace(xmlPluginDependency, ""))
+		}
+	}
+	tasks.buildPlugin {
+		archiveClassifier.set("platform-262")
 	}
 }
 
