@@ -2,6 +2,9 @@ package io.github.jinlongliao.mybatis.workbench.database;
 
 import static io.github.jinlongliao.mybatis.workbench.database.DatabaseMessages.databaseMessage;
 
+import com.google.gson.JsonElement;
+import com.google.gson.JsonParser;
+
 import org.mybatis.generator.api.intellij.IntellijColumnInfo;
 import org.mybatis.generator.api.intellij.IntellijTableInfo;
 
@@ -10,8 +13,10 @@ import java.sql.SQLException;
 import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.ResourceBundle;
 import java.util.function.Function;
@@ -19,7 +24,7 @@ import java.util.function.Function;
 import io.github.jinlongliao.mybatis.workbench.model.DbType;
 
 /**
- * 依据当前连接的表元数据浏览和更新数据。保存使用主键定位并核对显示时的原值。
+ * 依据当前连接的表元数据浏览、筛选、排序和安全维护表数据。写入操作会比较读取快照并限制目标行。
  *
  * @author liaojinlong
  * @since 2026/11/18 16:12
@@ -63,7 +68,24 @@ public final class JdbcTableEditor {
 	public static JdbcTableRows previewTableRows(JdbcDriverConnection database, DbType type, JdbcTable table,
 		Function<String, String> messages)
 		throws SQLException {
-		return previewTableRows(database, type, table, null, false, messages);
+		return previewTableRows(database, type, table, JdbcTableQueryOptions.none(), messages);
+	}
+
+	/**
+	 * 使用元数据列白名单构建有界 AND 服务端筛选和单列排序，并继续有界读取首页。
+	 * 空筛选仍只读取固定的首页行数，不执行无界结果查询。
+	 *
+	 * @param database 当前专用连接
+	 * @param type JDBC 方言
+	 * @param table 已选表或视图
+	 * @param options 有界 AND 筛选与单列排序设置
+	 * @param messages 宿主提供的错误文案查询函数
+	 * @return 原值预览、可编辑列、分页标志及查询设置
+	 * @throws SQLException 元数据无效、查询设置不受支持或数据库查询失败
+	 */
+	public static JdbcTableRows previewTableRows(JdbcDriverConnection database, DbType type, JdbcTable table,
+		JdbcTableQueryOptions options, Function<String, String> messages) throws SQLException {
+		return previewTableRows(database, type, table, null, false, options, messages);
 	}
 
 	/**
@@ -96,7 +118,7 @@ public final class JdbcTableEditor {
 		if (!previous.hasNextPage()) {
 			throw new SQLException(messages.apply("table.page.no.next"));
 		}
-		return previewTableRows(database, type, previous.table(), previous, false, messages);
+		return previewTableRows(database, type, previous.table(), previous, false, previous.queryOptions(), messages);
 	}
 
 	/**
@@ -129,7 +151,175 @@ public final class JdbcTableEditor {
 		if (!current.hasPreviousPage()) {
 			throw new SQLException(messages.apply("table.page.no.previous"));
 		}
-		return previewTableRows(database, type, current.table(), current, true, messages);
+		return previewTableRows(database, type, current.table(), current, true, current.queryOptions(), messages);
+	}
+
+	/**
+	 * 按当前表结构白名单新增一行。JSON 中省略的列继续使用数据库默认值，JSON null 写入 SQL NULL。
+	 * 主键可显式提供；自增列和生成列始终由数据库计算。失败时回滚整个事务。
+	 *
+	 * @param connection 当前操作独占的自动提交连接
+	 * @param type 当前数据库方言
+	 * @param page 用户确认操作时的表页快照
+	 * @param json 含列名和值的 JSON 对象
+	 * @param messages 宿主语言错误提示
+	 * @throws SQLException 表结构已变更、字段无效、约束拒绝或写入失败
+	 */
+	public static void insertTableRow(Connection connection, DbType type, JdbcTableRows page, String json,
+		Function<String, String> messages) throws SQLException {
+		if (!connection.getAutoCommit() || !connection.getMetaData().supportsTransactions() || !isBaseTable(page.table())
+			|| page.primaryKeys().isEmpty()) {
+			throw new SQLException(messages.apply("table.row.insert.requires.transactional.table"));
+		}
+		JsonElement parsed;
+		try {
+			parsed = JsonParser.parseString(json);
+		} catch (RuntimeException failure) {
+			throw new SQLException(messages.apply("table.row.insert.invalid.json"), failure);
+		}
+		if (!parsed.isJsonObject() || parsed.getAsJsonObject().entrySet().isEmpty()) {
+			throw new SQLException(messages.apply("table.row.insert.empty"));
+		}
+		if (parsed.getAsJsonObject().entrySet().size() > 1000) {
+			throw new SQLException(messages.apply("table.row.insert.too.many.columns"));
+		}
+		var metadata = connection.getMetaData();
+		var info = JdbcTableMetadata.readGenerationTable(metadata, type, page.table()).tableInfo();
+		List<IntellijColumnInfo> keys = info.getPrimaryKeyColumns();
+		List<String> keyNames = keys.stream().map(IntellijColumnInfo::getName).toList();
+		List<String> currentInsertable = info.getColumnInfos().stream()
+			.filter(column -> isScalarColumn(column) && !column.isGeneratedColumn() && !column.isAutoIncrement())
+			.map(IntellijColumnInfo::getName).toList();
+		if (!keyNames.equals(page.primaryKeys()) || !currentInsertable.equals(page.insertableColumns())) {
+			throw new SQLException(messages.apply("table.edit.structure.changed"));
+		}
+		Map<String, IntellijColumnInfo> columns = new HashMap<>(info.getColumnInfos().size());
+		for (IntellijColumnInfo column : info.getColumnInfos()) {
+			columns.put(column.getName(), column);
+		}
+		List<IntellijColumnInfo> selectedColumns = new ArrayList<>();
+		List<String> values = new ArrayList<>();
+		List<Boolean> nullValues = new ArrayList<>();
+		for (var entry : parsed.getAsJsonObject().entrySet()) {
+			IntellijColumnInfo column = columns.get(entry.getKey());
+			if (Objects.isNull(column) || !page.insertableColumns().contains(entry.getKey()) || !isScalarColumn(column)) {
+				throw new SQLException(messages.apply("table.row.insert.invalid.column"));
+			}
+			JsonElement value = entry.getValue();
+			if (!value.isJsonNull() && !value.isJsonPrimitive()) {
+				throw new SQLException(messages.apply("table.row.insert.invalid.value"));
+			}
+			selectedColumns.add(column);
+			nullValues.add(value.isJsonNull());
+			values.add(value.isJsonNull() ? null : value.getAsString());
+		}
+		String quote = metadata.getIdentifierQuoteString();
+		String table = JdbcTableSql.qualifiedTableName(type, page.table(), quote);
+		List<String> identifiers = new ArrayList<>(selectedColumns.size());
+		for (IntellijColumnInfo column : selectedColumns) {
+			identifiers.add(JdbcTableSql.quoteIdentifier(column.getName(), quote));
+		}
+		String placeholders = String.join(", ", Collections.nCopies(selectedColumns.size(), "?"));
+		String sql = "INSERT INTO " + table + " (" + String.join(", ", identifiers) + ") VALUES (" + placeholders + ")";
+		connection.setAutoCommit(false);
+		try {
+			JdbcTableSql.assertTransactionalTable(connection, type, page.table(),
+				"SELECT " + identifiers.getFirst() + " FROM " + table + " WHERE 1 = 0");
+			try (var insert = connection.prepareStatement(sql)) {
+				insert.setQueryTimeout(15);
+				for (int index = 0; index < selectedColumns.size(); index++) {
+					int jdbcType = selectedColumns.get(index).getDataType();
+					if (nullValues.get(index)) {
+						insert.setNull(index + 1, jdbcType);
+					} else {
+						insert.setObject(index + 1, values.get(index), jdbcType);
+					}
+				}
+				if (insert.executeUpdate() != 1) {
+					throw new SQLException(messages.apply("table.row.insert.unexpected.count"));
+				}
+			}
+			connection.commit();
+			connection.setAutoCommit(true);
+		} catch (SQLException | RuntimeException failure) {
+			rollbackAndRestoreAutoCommit(connection, failure);
+			throw failure;
+		}
+	}
+
+	/**
+	 * 按所选行的完整标量快照和主键执行单行删除，数据库中任何字段已变化时拒绝删除。
+	 * 比较谓词中的数据值全部绑定；列过多导致比较参数超过安全上限时不执行写入。
+	 *
+	 * @param connection 当前操作独占的自动提交连接
+	 * @param type 当前数据库方言
+	 * @param page 用户确认操作时的表页快照
+	 * @param rowIndex 结果页模型行索引
+	 * @param messages 宿主语言错误提示
+	 * @throws SQLException 表结构或原始行已变更、目标不唯一或数据库拒绝写入
+	 */
+	public static void deleteTableRow(Connection connection, DbType type, JdbcTableRows page, int rowIndex,
+		Function<String, String> messages) throws SQLException {
+		if (!connection.getAutoCommit() || !connection.getMetaData().supportsTransactions() || !isBaseTable(page.table())
+			|| page.primaryKeys().isEmpty()) {
+			throw new SQLException(messages.apply("table.row.delete.requires.transactional.table"));
+		}
+		var metadata = connection.getMetaData();
+		var info = JdbcTableMetadata.readGenerationTable(metadata, type, page.table()).tableInfo();
+		List<IntellijColumnInfo> keys = info.getPrimaryKeyColumns();
+		if (!keys.stream().map(IntellijColumnInfo::getName).toList().equals(page.primaryKeys())) {
+			throw new SQLException(messages.apply("table.edit.structure.changed"));
+		}
+		List<IntellijColumnInfo> comparedColumns = info.getColumnInfos().stream().filter(JdbcTableEditor::isScalarColumn).toList();
+		if (comparedColumns.isEmpty() || comparedColumns.size() != info.getColumnInfos().size() || comparedColumns.size() > 1000
+			|| !comparedColumns.stream().map(IntellijColumnInfo::getName).toList().equals(page.result().columnLabels())
+			|| rowIndex < 0 || rowIndex >= page.result().rows().size()) {
+			throw new SQLException(messages.apply(comparedColumns.size() != info.getColumnInfos().size()
+				? "table.row.delete.unsupported.columns" : "table.row.delete.structure.changed"));
+		}
+		List<String> original = page.result().rows().get(rowIndex);
+		if (keys.stream().anyMatch(key -> {
+			int position = page.result().columnLabels().indexOf(key.getName());
+			return position < 0 || Objects.isNull(original.get(position));
+		})) {
+			throw new SQLException(messages.apply("table.edit.missing.primary.key"));
+		}
+		List<String> predicates = new ArrayList<>(comparedColumns.size());
+		List<Object> values = new ArrayList<>(comparedColumns.size());
+		List<Integer> types = new ArrayList<>(comparedColumns.size());
+		String quote = metadata.getIdentifierQuoteString();
+		for (IntellijColumnInfo column : comparedColumns) {
+			String identifier = JdbcTableSql.quoteIdentifier(column.getName(), quote);
+			String value = original.get(page.result().columnLabels().indexOf(column.getName()));
+			if (Objects.isNull(value)) {
+				predicates.add(identifier + " IS NULL");
+			} else {
+				predicates.add(identifier + " = ?");
+				values.add(value);
+				types.add(column.getDataType());
+			}
+		}
+		String table = JdbcTableSql.qualifiedTableName(type, page.table(), quote);
+		connection.setAutoCommit(false);
+		try {
+			JdbcTableSql.assertTransactionalTable(connection, type, page.table(),
+				"SELECT " + JdbcTableSql.quoteIdentifier(comparedColumns.getFirst().getName(), quote)
+					+ " FROM " + table + " WHERE 1 = 0");
+			try (var delete = connection.prepareStatement("DELETE FROM " + table + " WHERE " + String.join(" AND ", predicates))) {
+				delete.setQueryTimeout(15);
+				for (int index = 0; index < values.size(); index++) {
+					delete.setObject(index + 1, values.get(index), types.get(index));
+				}
+				if (delete.executeUpdate() != 1) {
+					throw new SQLException(messages.apply("table.row.delete.original.value.changed"));
+				}
+			}
+			connection.commit();
+			connection.setAutoCommit(true);
+		} catch (SQLException | RuntimeException failure) {
+			rollbackAndRestoreAutoCommit(connection, failure);
+			throw failure;
+		}
 	}
 
 	/**
@@ -140,22 +330,60 @@ public final class JdbcTableEditor {
 	 * @param table    已选表或视图
 	 * @param previous 正显示的页面，首次预览为空
 	 * @param backward 是否从首行逆序读取
+	 * @param options 服务端筛选和排序设置；续读时必须与页面快照一致
 	 * @param messages 宿主提供的错误文案查询函数
 	 * @return 原值预览及编辑、续读状态
 	 * @throws SQLException 读取元数据失败、主键变化或查询失败
 	 */
 	private static JdbcTableRows previewTableRows(JdbcDriverConnection database, DbType type, JdbcTable table,
-												  JdbcTableRows previous, boolean backward,
+							  JdbcTableRows previous, boolean backward, JdbcTableQueryOptions options,
 		Function<String, String> messages) throws SQLException {
 		var metadata = database.connection().getMetaData();
 		IntellijTableInfo info = JdbcTableMetadata.readGenerationTable(metadata, type, table).tableInfo();
-		List<String> columns = info.getColumnInfos().stream().filter(JdbcTableEditor::isScalarColumn)
-			.map(IntellijColumnInfo::getName).toList();
+		var scalarColumns = info.getColumnInfos().stream().filter(JdbcTableEditor::isScalarColumn).toList();
+		List<String> columns = scalarColumns.stream().map(IntellijColumnInfo::getName).toList();
 		if (columns.isEmpty()) {
 			throw new SQLException(messages.apply("table.page.no.scalar.columns"));
 		}
 		List<IntellijColumnInfo> keys = info.getPrimaryKeyColumns();
 		boolean writable = isBaseTable(table) && !keys.isEmpty() && keys.stream().allMatch(JdbcTableEditor::isScalarColumn);
+		JdbcTableQueryOptions queryOptions = Objects.isNull(options) ? JdbcTableQueryOptions.none() : options;
+		if (queryOptions.filters().size() > JdbcTableQueryOptions.MAX_FILTER_CONDITIONS) {
+			throw new SQLException(messages.apply("table.filter.conditions.bounds"));
+		}
+		int filterParameterCount = 0;
+		List<IntellijColumnInfo> filterColumns = new ArrayList<>(queryOptions.filters().size());
+		for (JdbcTableFilterCondition filter : queryOptions.filters()) {
+			IntellijColumnInfo filterColumn = findScalarColumn(scalarColumns, filter.column());
+			if (Objects.isNull(filterColumn)) {
+				throw new SQLException(messages.apply("table.filter.invalid.column"));
+			}
+			if (Objects.isNull(filter.operator())) {
+				throw new SQLException(messages.apply("table.filter.invalid.operator"));
+			}
+			if (filter.operator() == JdbcTableFilterOperator.IN
+				&& (filter.values().isEmpty() || filter.values().size() > JdbcTableQueryOptions.MAX_IN_VALUES)) {
+				throw new SQLException(messages.apply("table.filter.in.bounds"));
+			}
+			if (filter.operator() != JdbcTableFilterOperator.IN && !filter.values().isEmpty()) {
+				throw new SQLException(messages.apply("table.filter.invalid.operator"));
+			}
+			if (filter.operator() == JdbcTableFilterOperator.PREFIX_LIKE && !isTextColumn(filterColumn)) {
+				throw new SQLException(messages.apply("table.filter.like.requires.text.column"));
+			}
+			filterParameterCount += filter.operator() == JdbcTableFilterOperator.IN
+				? filter.values().size() : filter.operator().requiresValue() ? 1 : 0;
+			filterColumns.add(filterColumn);
+		}
+		if (filterParameterCount > JdbcTableQueryOptions.MAX_FILTER_PARAMETERS) {
+			throw new SQLException(messages.apply("table.filter.parameters.bounds"));
+		}
+		if (queryOptions.hasSort()) {
+			IntellijColumnInfo sortColumn = findScalarColumn(scalarColumns, queryOptions.sortColumn());
+			if (Objects.isNull(sortColumn) || !Boolean.FALSE.equals(sortColumn.getNullable())) {
+				throw new SQLException(messages.apply("table.sort.requires.non.null.scalar.column"));
+			}
+		}
 		String quote = metadata.getIdentifierQuoteString();
 		List<String> projected = new ArrayList<>(columns.size());
 		for (String column : columns) {
@@ -166,14 +394,24 @@ public final class JdbcTableEditor {
 			.append(JdbcTableSql.qualifiedTableName(type, table, quote));
 		boolean canContinue = writable && keys.stream().allMatch(key -> Boolean.FALSE.equals(key.getNullable()));
 		var keyNames = keys.stream().map(IntellijColumnInfo::getName).toList();
-		List<String> boundary = new ArrayList<>(keys.size());
+		List<IntellijColumnInfo> orderColumns = new ArrayList<>();
+		if (queryOptions.hasSort()) {
+			orderColumns.add(findScalarColumn(scalarColumns, queryOptions.sortColumn()));
+		}
+		for (IntellijColumnInfo key : keys) {
+			if (orderColumns.stream().noneMatch(column -> column.getName().equals(key.getName()))) {
+				orderColumns.add(key);
+			}
+		}
+		List<String> boundary = new ArrayList<>(orderColumns.size());
 		if (Objects.nonNull(previous)) {
-			if (!canContinue || !keyNames.equals(previous.primaryKeys())) {
+			if (!canContinue || !keyNames.equals(previous.primaryKeys()) || !queryOptions.equals(previous.queryOptions())) {
 				throw new SQLException(messages.apply("table.page.primary.key.changed"));
 			}
 			var existing = previous.result().rows();
 			var boundaryRow = backward ? existing.getFirst() : existing.getLast();
-			for (String name : keyNames) {
+			for (IntellijColumnInfo orderColumn : orderColumns) {
+				String name = orderColumn.getName();
 				String value = boundaryRow.get(previous.result().columnLabels().indexOf(name));
 				if (Objects.isNull(value)) {
 					throw new SQLException(messages.apply("table.page.primary.key.incomplete"));
@@ -181,29 +419,76 @@ public final class JdbcTableEditor {
 				boundary.add(value);
 			}
 		}
-		String comparison = backward ? " < " : " > ";
-		boolean tupleBoundary = (type == DbType.SQLite || type == DbType.PostgreSQL) && !boundary.isEmpty();
-		if (writable) {
-			List<String> order = new ArrayList<>(keys.size());
-			for (IntellijColumnInfo key : keys) {
-				order.add(JdbcTableSql.quoteIdentifier(key.getName(), quote));
-			}
-			if (tupleBoundary) {
-				// SQLite 和 PostgreSQL 可将行值比较直接用作复合索引范围，避免逐行过滤起点以前的记录。
-				String placeholders = String.join(", ", Collections.nCopies(order.size(), "?"));
-				sql.append(" WHERE (").append(String.join(", ", order)).append(')').append(comparison).append('(').append(placeholders).append(')');
-			} else if (!boundary.isEmpty()) {
-				List<String> ranges = new ArrayList<>(order.size());
-				List<String> equalities = new ArrayList<>(order.size());
-				for (String key : order) {
-					String prefix = equalities.isEmpty() ? "" : String.join(" AND ", equalities) + " AND ";
-					ranges.add("(" + prefix + key + comparison + "?)");
-					equalities.add(key + " = ?");
+		List<Object> parameterValues = new ArrayList<>();
+		List<Integer> parameterTypes = new ArrayList<>();
+		List<String> where = new ArrayList<>();
+		for (int index = 0; index < queryOptions.filters().size(); index++) {
+			JdbcTableFilterCondition filter = queryOptions.filters().get(index);
+			IntellijColumnInfo filterColumn = filterColumns.get(index);
+			String filterIdentifier = JdbcTableSql.quoteIdentifier(filterColumn.getName(), quote);
+			if (filter.operator() == JdbcTableFilterOperator.IN) {
+				String placeholders = String.join(", ", Collections.nCopies(filter.values().size(), "?"));
+				where.add(filterIdentifier + " IN (" + placeholders + ")");
+				for (String filterValue : filter.values()) {
+					parameterValues.add(filterValue);
+					parameterTypes.add(filterColumn.getDataType());
 				}
-				sql.append(" WHERE ").append(String.join(" OR ", ranges));
+			} else {
+				where.add(filterIdentifier + " " + filter.operator().sql());
+				if (filter.operator().requiresValue()) {
+					where.set(where.size() - 1, where.getLast() + " ?");
+					parameterValues.add(filter.value());
+					parameterTypes.add(filterColumn.getDataType());
+				}
 			}
-			if (backward) {
-				order.replaceAll(key -> key + " DESC");
+		}
+		if (!boundary.isEmpty()) {
+			boolean descending = queryOptions.hasSort() && queryOptions.sortDescending();
+			boolean tupleBoundary = (type == DbType.SQLite || type == DbType.PostgreSQL)
+				&& (!descending || orderColumns.size() == 1);
+			boolean greater = (backward == descending);
+			if (tupleBoundary) {
+				List<String> order = new ArrayList<>(orderColumns.size());
+				for (IntellijColumnInfo orderColumn : orderColumns) {
+					order.add(JdbcTableSql.quoteIdentifier(orderColumn.getName(), quote));
+				}
+				String placeholders = String.join(", ", Collections.nCopies(order.size(), "?"));
+				where.add("(" + String.join(", ", order) + ")" + (greater ? " > " : " < ")
+					+ "(" + placeholders + ")");
+				for (int index = 0; index < orderColumns.size(); index++) {
+					parameterValues.add(boundary.get(index));
+					parameterTypes.add(orderColumns.get(index).getDataType());
+				}
+			} else {
+				List<String> ranges = new ArrayList<>(orderColumns.size());
+				for (int last = 0; last < orderColumns.size(); last++) {
+					List<String> terms = new ArrayList<>(last + 1);
+					for (int prefix = 0; prefix <= last; prefix++) {
+						IntellijColumnInfo orderColumn = orderColumns.get(prefix);
+						String identifier = JdbcTableSql.quoteIdentifier(orderColumn.getName(), quote);
+						boolean termDescending = prefix == 0 && descending;
+						boolean termGreater = (backward == termDescending);
+						terms.add(identifier + (prefix == last ? (termGreater ? " > ?" : " < ?") : " = ?"));
+						parameterValues.add(boundary.get(prefix));
+						parameterTypes.add(orderColumn.getDataType());
+					}
+					ranges.add("(" + String.join(" AND ", terms) + ")");
+				}
+				where.add("(" + String.join(" OR ", ranges) + ")");
+			}
+		}
+		if (!where.isEmpty()) {
+			sql.append(" WHERE ").append(String.join(" AND ", where));
+		}
+		if (!orderColumns.isEmpty()) {
+			List<String> order = new ArrayList<>(orderColumns.size());
+			for (int index = 0; index < orderColumns.size(); index++) {
+				IntellijColumnInfo orderColumn = orderColumns.get(index);
+				boolean descending = index == 0 && queryOptions.hasSort() && queryOptions.sortDescending();
+				if (backward) {
+					descending = !descending;
+				}
+				order.add(JdbcTableSql.quoteIdentifier(orderColumn.getName(), quote) + (descending ? " DESC" : " ASC"));
 			}
 			sql.append(" ORDER BY ").append(String.join(", ", order));
 		}
@@ -218,25 +503,11 @@ public final class JdbcTableEditor {
 			.filter(column -> isScalarColumn(column) && !column.isGeneratedColumn() && !column.isAutoIncrement()
 				&& keys.stream().noneMatch(key -> key.getName().equals(column.getName())))
 			.map(IntellijColumnInfo::getName).toList() : List.of();
-		JdbcQueryResult result;
-		try (var statement = database.connection().prepareStatement(sql.toString())) {
-			statement.setQueryTimeout(15);
-			int parameter = 1;
-			if (tupleBoundary) {
-				for (int key = 0; key < boundary.size(); key++) {
-					statement.setObject(parameter++, boundary.get(key), keys.get(key).getDataType());
-				}
-			} else {
-				for (int last = 0; last < boundary.size(); last++) {
-					for (int key = 0; key <= last; key++) {
-						statement.setObject(parameter++, boundary.get(key), keys.get(key).getDataType());
-					}
-				}
-			}
-			try (var rows = statement.executeQuery()) {
-				result = JdbcDriverConnection.readSqlResult(rows, PREVIEW_ROWS);
-			}
-		}
+		List<String> insertable = writable ? info.getColumnInfos().stream()
+			.filter(column -> isScalarColumn(column) && !column.isGeneratedColumn() && !column.isAutoIncrement())
+			.map(IntellijColumnInfo::getName).toList() : List.of();
+		JdbcQueryResult result = database.executePreparedQuery(sql.toString(), parameterValues, parameterTypes,
+			PREVIEW_ROWS, 15);
 		boolean readRows = !result.rows().isEmpty();
 		boolean hasPrevious = canContinue && readRows && (backward ? result.truncated() : Objects.nonNull(previous));
 		boolean hasNext = canContinue && readRows && (backward || result.truncated());
@@ -244,7 +515,22 @@ public final class JdbcTableEditor {
 			result = new JdbcQueryResult(result.columnLabels(), List.copyOf(result.rows().reversed()),
 				result.truncated(), result.updateCount());
 		}
-		return new JdbcTableRows(table, result, keyNames, editable, hasNext, hasPrevious);
+		return new JdbcTableRows(table, result, scalarColumns.stream().map(IntellijColumnInfo::getDataType).toList(),
+			keyNames, editable, hasNext, hasPrevious, queryOptions, insertable);
+	}
+
+	/**
+	 * 从元数据标量列中精确查找用户选择的列，所有表单标识符必须经过此白名单。
+	 *
+	 * @param columns 当前表的标量列
+	 * @param name 表单提供的列名
+	 * @return 匹配列或空
+	 */
+	private static IntellijColumnInfo findScalarColumn(List<IntellijColumnInfo> columns, String name) {
+		if (Objects.isNull(name) || name.isEmpty()) {
+			return null;
+	}
+		return columns.stream().filter(column -> column.getName().equals(name)).findFirst().orElse(null);
 	}
 
 	/**
@@ -368,14 +654,30 @@ public final class JdbcTableEditor {
 				}
 			}
 			connection.commit();
+			connection.setAutoCommit(true);
 			return storedValue;
 		} catch (SQLException | RuntimeException failure) {
-			try {
-				connection.rollback();
-			} catch (SQLException rollbackFailure) {
-				failure.addSuppressed(rollbackFailure);
-			}
+			rollbackAndRestoreAutoCommit(connection, failure);
 			throw failure;
+		}
+	}
+
+	/**
+	 * 回滚失败写入并恢复调用前已确认的自动提交模式，清理错误作为主失败的 suppressed cause 保留。
+	 *
+	 * @param connection 当前事务连接
+	 * @param failure 已发生的 SQL 或运行时异常
+	 */
+	private static void rollbackAndRestoreAutoCommit(Connection connection, Throwable failure) {
+		try {
+			connection.rollback();
+		} catch (SQLException rollbackFailure) {
+			failure.addSuppressed(rollbackFailure);
+		}
+		try {
+			connection.setAutoCommit(true);
+		} catch (SQLException restoreFailure) {
+			failure.addSuppressed(restoreFailure);
 		}
 	}
 
@@ -400,6 +702,19 @@ public final class JdbcTableEditor {
 			case Types.CHAR, Types.VARCHAR, Types.NCHAR, Types.NVARCHAR, Types.BIGINT, Types.INTEGER, Types.SMALLINT,
 				 Types.TINYINT, Types.DECIMAL, Types.NUMERIC, Types.REAL, Types.FLOAT, Types.DOUBLE, Types.BOOLEAN,
 				 Types.BIT, Types.DATE, Types.TIME, Types.TIMESTAMP -> true;
+			default -> false;
+		};
+	}
+
+	/**
+	 * Prefix LIKE is limited to JDBC character columns so drivers do not apply dialect-dependent numeric conversions.
+	 *
+	 * @param column validated scalar column metadata
+	 * @return true for JDBC character types supported by this editor
+	 */
+	private static boolean isTextColumn(IntellijColumnInfo column) {
+		return switch (column.getDataType()) {
+			case Types.CHAR, Types.VARCHAR, Types.NCHAR, Types.NVARCHAR -> true;
 			default -> false;
 		};
 	}

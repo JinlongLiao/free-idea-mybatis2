@@ -1,5 +1,6 @@
 package io.github.jinlongliao.mybatis.workbench.model;
 
+import org.mybatis.generator.api.intellij.IntellijColumnInfo;
 import org.mybatis.generator.api.intellij.IntellijTableInfo;
 
 /**
@@ -12,4 +13,14 @@ import org.mybatis.generator.api.intellij.IntellijTableInfo;
  * @since 2026/11/18 14:35
  */
 public record GenerationTable(IntellijTableInfo tableInfo, DbType dbType, String qualifier) {
+	/**
+	 * 查找可由数据库生成的主键列。手工赋值的主键仍参与映射和 INSERT。
+	 *
+	 * @return 第一列自增主键的名称，无自增主键时为空字符串
+	 */
+	public String defaultGeneratedKeyColumn() {
+		return tableInfo.getPrimaryKeyColumns().stream()
+			.filter(IntellijColumnInfo::isAutoIncrement)
+			.findFirst().map(IntellijColumnInfo::getName).orElse("");
+	}
 }

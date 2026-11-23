@@ -147,6 +147,9 @@ public final class WorkbenchConnectionProfiles implements PersistentStateCompone
 				.setAttribute("cluster", Boolean.toString(profile.cluster())).setAttribute("tls", Boolean.toString(profile.tls()))
 				.setAttribute("logicalDatabase", Integer.toString(profile.logicalDatabase())));
 		}
+		log.info("连接状态诊断，stage=getState, stateElement={}, childElements={}, connectionCount={}, nosqlCount={}",
+			root.getName(), root.getChildren().stream().map(Element::getName).distinct().toList(),
+			profiles.size(), noSqlProfiles.size());
 		return root;
 	}
 
@@ -155,8 +158,13 @@ public final class WorkbenchConnectionProfiles implements PersistentStateCompone
 	 */
 	@Override
 	public synchronized void loadState(@NotNull Element state) {
+		List<Element> jdbcElements = state.getChildren("connection");
+		List<Element> noSqlElements = state.getChildren("nosql");
+		log.info("连接状态诊断，stage=loadState.begin, stateElement={}, childElements={}, connectionCount={}, nosqlCount={}",
+			state.getName(), state.getChildren().stream().map(Element::getName).distinct().toList(),
+			jdbcElements.size(), noSqlElements.size());
 		profiles.clear();
-		for (Element item : state.getChildren("connection")) {
+		for (Element item : jdbcElements) {
 			try {
 				saveProfile(JdbcConnectionProfile.readProfile(new StringReader(item.getText())));
 			} catch (IOException failure) {
@@ -164,7 +172,7 @@ public final class WorkbenchConnectionProfiles implements PersistentStateCompone
 			}
 		}
 		noSqlProfiles.clear();
-		for (Element item : state.getChildren("nosql")) {
+		for (Element item : noSqlElements) {
 			try {
 				saveNoSqlProfile(new NoSqlConnectionProfile(UUID.fromString(item.getAttributeValue("id", "")),
 					item.getAttributeValue("name", ""), NoSqlSourceType.valueOf(item.getAttributeValue("type", "")),
@@ -186,5 +194,19 @@ public final class WorkbenchConnectionProfiles implements PersistentStateCompone
 				}
 			});
 		}
+		log.info("连接状态诊断，stage=loadState.complete, stateElement={}, childElements={}, loadedConnectionCount={}, loadedNosqlCount={}",
+			state.getName(), state.getChildren().stream().map(Element::getName).distinct().toList(),
+			profiles.size(), noSqlProfiles.size());
+	}
+
+	/**
+	 * IDE 没有持久化状态时记录空状态回调，便于区分未读取与读取了空配置。
+	 *
+	 * @see <a href="https://plugins.jetbrains.com/docs/intellij/persisting-state-of-components.html">IntelliJ Platform Persisting State of Components</a>
+	 */
+	@Override
+	public synchronized void noStateLoaded() {
+		log.info("连接状态诊断，stage=noStateLoaded, component=MyBatisWorkbenchConnections, stateElement=connections, "
+			+ "connectionCount={}, nosqlCount={}", profiles.size(), noSqlProfiles.size());
 	}
 }

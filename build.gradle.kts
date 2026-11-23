@@ -34,7 +34,7 @@ val databaseCore = sourceSets.create("databaseCore") {
 		"org/mybatis/generator/api/intellij/**",
 	)
 	resources.srcDir("src/main/resources")
-	resources.include("messages/WorkbenchBundle*.properties")
+	resources.include("messages/WorkbenchBundle*.properties", "database/redis/read-stream-page.lua")
 }
 
 val databaseCoreImplementation = configurations.named(databaseCore.implementationConfigurationName)
@@ -57,6 +57,7 @@ dependencies {
 	databaseCoreImplementation("com.google.code.gson:gson:2.13.2")
 	databaseCoreImplementation("org.apache.commons:commons-csv:1.14.1")
 	// 独立宿主需要日志 API，IDE 插件继续使用宿主提供的版本。
+	add(databaseCore.compileOnlyConfigurationName, "org.slf4j:slf4j-api:2.0.18")
 	add(databaseCore.runtimeOnlyConfigurationName, "org.slf4j:slf4j-api:2.0.18")
 	testImplementation("org.junit.jupiter:junit-jupiter:5.14.0")
 	testRuntimeOnly("org.junit.platform:junit-platform-launcher:1.14.0")

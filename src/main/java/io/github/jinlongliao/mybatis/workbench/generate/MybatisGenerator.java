@@ -200,16 +200,21 @@ public class MybatisGenerator {
 			tableConfig.withSelectByExampleStatementEnabled(false);
 		}
 
-		if (DbType.PostgreSQL.equals(table.dbType()) || DbType.SqlServer.equals(table.dbType())) {
+		String delimiter = switch (table.dbType()) {
+			case MySQL, MariaDB -> "`";
+			case PostgreSQL, H2, SQLite, Oracle -> "\"";
+			case SqlServer -> "]";
+			case null, default -> "";
+		};
+		if (!delimiter.isEmpty()) {
 			tableConfig.withDelimitIdentifiers(true);
-		}
-		if (DbType.SqlServer.equals(table.dbType())) {
-			// 元数据读取使用原始名称，生成 SQL 时才对标识符中的右方括号转义。
+			// 元数据读取使用原始名称，生成 SQL 时双写名称中的结束定界符。
+			String escapedDelimiter = delimiter.repeat(2);
 			tableConfig.withProperty(new Property(PropertyRegistry.TABLE_RUNTIME_TABLE_NAME,
-				config.getTableName().replace("]", "]]")));
+				config.getTableName().replace(delimiter, escapedDelimiter)));
 			if (config.isUseSchemaPrefix() && !StringUtils.isEmpty(table.qualifier())) {
 				tableConfig.withProperty(new Property(PropertyRegistry.TABLE_RUNTIME_SCHEMA,
-					table.qualifier().replace("]", "]]")));
+					table.qualifier().replace(delimiter, escapedDelimiter)));
 			}
 		}
 

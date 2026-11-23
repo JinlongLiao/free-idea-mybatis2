@@ -14,14 +14,17 @@ import com.intellij.ui.IdeBorderFactory;
 import com.intellij.ui.components.*;
 import com.intellij.util.ui.JBUI;
 
-import org.mybatis.generator.api.intellij.IntellijColumnInfo;
 
 import java.awt.*;
 import java.awt.event.*;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 
 import javax.swing.*;
 
@@ -105,8 +108,7 @@ public class MybatisGeneratorMainUI extends JFrame {
 		GenerationTable firstTable = this.generationTables.getFirst();
 		String tableName = firstTable.tableInfo().getTableName();
 		String modelName = StringUtils.dbStringToCamelStyle(tableName);
-		String primaryKey = firstTable.tableInfo().getPrimaryKeyColumns().stream()
-			.findFirst().map(IntellijColumnInfo::getName).orElse("");
+		String primaryKey = firstTable.defaultGeneratedKeyColumn();
 		String projectFolder = project.getBasePath();
 
 		boolean multiTable;
@@ -143,9 +145,9 @@ public class MybatisGeneratorMainUI extends JFrame {
 		}
 		tablePanel.add(tableNameField);
 
-		tablePanel.add(new JLabel("主键(选填):"));
+		tablePanel.add(new JLabel("自增主键(选填):"));
 		if (generationTables.size() > 1) {
-			keyField.addFocusListener(new JTextFieldHintListener(keyField, "eg:primary key"));
+			keyField.addFocusListener(new JTextFieldHintListener(keyField, "e.g. auto-increment key"));
 		} else {
 			keyField.setText(primaryKey);
 		}
@@ -477,7 +479,50 @@ public class MybatisGeneratorMainUI extends JFrame {
 		}, KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT);
 	}
 
+	/**
+	 * 检查同一批次下共享 Java 目录的文件名，兼顾大小写不敏感的文件系统。
+	 *
+	 * @param tables 此次选择的表快照
+	 * @param useExample 是否同时生成 Example 类
+	 * @param mapperPostfix 同目录生成时的 Mapper 后缀，分目录时为空引用
+	 * @return 首个冲突的 Java 名称，没有冲突时返回空字符串
+	 */
+	private static String findConflictingBatchModelName(List<GenerationTable> tables, boolean useExample, String mapperPostfix) {
+		boolean sharedMapperDirectory = Objects.nonNull(mapperPostfix);
+		String mapperFileSuffix = sharedMapperDirectory ? mapperPostfix.toLowerCase(Locale.ROOT) : "";
+		var modelNames = new HashSet<String>(tables.size() * (1 + (useExample ? 1 : 0) + (sharedMapperDirectory ? 1 : 0)));
+		for (GenerationTable table : tables) {
+			String modelName = StringUtils.dbStringToCamelStyle(table.tableInfo().getTableName());
+			String fileName = modelName.toLowerCase(Locale.ROOT);
+			if (!modelNames.add(fileName)) {
+				return modelName;
+			}
+			if (useExample && !modelNames.add(fileName + "example")) {
+				return modelName + "Example";
+			}
+			if (sharedMapperDirectory && !modelNames.add(fileName + mapperFileSuffix)) {
+				return modelName + mapperPostfix;
+			}
+		}
+		return "";
+	}
+
+	/**
+	 * 先验证整批默认名称，再生成文件。遇到名称冲突时保留配置表单供用户调整。
+	 */
 	private void onOK() {
+		if (generationTables.size() > 1) {
+			Path modelDirectory = resolveBatchJavaDirectory(modelMvnField.getText(), modelPackageField.getText());
+			Path mapperDirectory = resolveBatchJavaDirectory(daoMvnField.getText(), daoPackageField.getText());
+			String mapperPostfix = modelDirectory.toString().equalsIgnoreCase(mapperDirectory.toString())
+				? daoPostfixField.getText() : null;
+			String conflict = findConflictingBatchModelName(generationTables, useExampleBox.isSelected(), mapperPostfix);
+			if (!conflict.isEmpty()) {
+				Messages.showErrorDialog(project, WorkbenchBundle.message("generator.batch.model.name.conflict", conflict),
+					getTitle());
+				return;
+			}
+		}
 		try {
 			dispose();
 			List<String> result = new ArrayList<>();
@@ -522,8 +567,7 @@ public class MybatisGeneratorMainUI extends JFrame {
 				for (GenerationTable generationTable : generationTables) {
 					String tableName = generationTable.tableInfo().getTableName();
 					String modelName = StringUtils.dbStringToCamelStyle(tableName);
-					String primaryKey = generationTable.tableInfo().getPrimaryKeyColumns().stream()
-						.findFirst().map(IntellijColumnInfo::getName).orElse("");
+					String primaryKey = generationTable.defaultGeneratedKeyColumn();
 					Config generator_config = new Config();
 					generator_config.setName(tableName);
 					generator_config.setTableName(tableName);
@@ -570,6 +614,19 @@ public class MybatisGeneratorMainUI extends JFrame {
 		} finally {
 			dispose();
 		}
+	}
+
+	/**
+	 * 按生成器的目录与包名规则解析批量 Java 输出位置。
+	 *
+	 * @param sourcePath Java 源码相对目录
+	 * @param packageName Java 包名，未填写时使用 generator
+	 * @return 规范化的 Java 文件所在目录
+	 */
+	private Path resolveBatchJavaDirectory(String sourcePath, String packageName) {
+		String javaPackage = packageName.isEmpty() ? "generator" : packageName;
+		return Path.of(projectFolderBtn.getText() + "/" + sourcePath + "/" + javaPackage.replace('.', '/'))
+			.toAbsolutePath().normalize();
 	}
 
 	private void onCancel() {

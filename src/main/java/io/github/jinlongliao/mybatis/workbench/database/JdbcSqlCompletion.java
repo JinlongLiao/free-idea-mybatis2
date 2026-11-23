@@ -45,10 +45,11 @@ public final class JdbcSqlCompletion {
 			+ "PARTITION|USE|FORCE|IGNORE|INDEXED|NOT|TABLESAMPLE|CONNECT|START|MODEL|PIVOT|UNPIVOT|OPTION)"
 			+ "(?![\\p{L}\\p{N}_$])";
 
-	/** 表引用分支依次捕获模式、表名和别名。 */
+	/** 表引用分支依次捕获模式、表名和可选别名，跳过更长的限定名及表函数。 */
 	private static final String TABLE_ALIAS_DECLARATION =
 		"(?is)\\b(?:FROM|JOIN)\\s+(?:(" + ALIAS_IDENTIFIER + ")\\s*\\.\\s*)?("
-			+ ALIAS_IDENTIFIER + ")\\s+(?:AS\\s+|(?!" + TABLE_CLAUSE_KEYWORD + "))(" + ALIAS_IDENTIFIER + ")";
+			+ ALIAS_IDENTIFIER + ")(?!\\s*[.(])(?:\\s+(?:AS\\s+|(?!" + TABLE_CLAUSE_KEYWORD + "))("
+			+ ALIAS_IDENTIFIER + "))?";
 
 	/** 跳过字符串、注释及引用标识符，并标记括号与语句分隔符。 */
 	private static final String SQL_COMPLETION_TOKENS =
@@ -115,6 +116,9 @@ public final class JdbcSqlCompletion {
 		}
 		boolean hasQualifier = bracketQualifier || !qualifier.isEmpty();
 		List<String> declaration = readTableAlias(type, sql, caret, qualifier);
+		if (Objects.isNull(declaration)) {
+			return List.of();
+		}
 		var choices = new LinkedHashSet<String>();
 		if (!hasQualifier || Objects.nonNull(table)
 			&& (declaration.isEmpty() ? matchesSqlName(type, qualifier, table.name()) : matchesTableAlias(type, table, declaration))) {
@@ -158,6 +162,22 @@ public final class JdbcSqlCompletion {
 	 */
 	public static JdbcTable resolveSqlCompletionTable(DbType type, String sql, int caret, List<JdbcTable> tables,
 		JdbcTable selected) {
+		return resolveSqlCompletionTable(type, sql, caret, tables, selected, "");
+	}
+
+	/**
+	 * 解析当前控制台中的表引用。未限定的表按控制台绑定的库或模式解析，显式限定名可跨库。
+	 *
+	 * @param type 当前数据库方言
+	 * @param sql 编辑器全文
+	 * @param caret 当前光标位置
+	 * @param tables 当前连接已浏览的对象
+	 * @param selected 对象树当前选中表，可为空
+	 * @param namespace 绑定的库或模式，空字符串表示保留原有解析规则
+	 * @return 唯一匹配的表，无法解析时为空
+	 */
+	public static JdbcTable resolveSqlCompletionTable(DbType type, String sql, int caret, List<JdbcTable> tables,
+		JdbcTable selected, String namespace) {
 		int start = findIdentifierBoundary(sql, caret, -1);
 		boolean bracketQualifier = type == DbType.SqlServer && start >= 2 && sql.startsWith("].", start - 2);
 		String qualifier = bracketQualifier ? readBracketQualifier(sql, start - 1) : readSqlQualifier(sql, start);
@@ -165,13 +185,18 @@ public final class JdbcSqlCompletion {
 			qualifier = qualifier.toLowerCase(Locale.ROOT);
 		}
 		if (qualifier.isEmpty()) {
-			return bracketQualifier ? null : selected;
+			return bracketQualifier || (!namespace.isEmpty() && Objects.nonNull(selected)
+				&& !namespace.equals(tableScope(selected))) ? null : selected;
 		}
 		List<String> alias = readTableAlias(type, sql, caret, qualifier);
+		if (Objects.isNull(alias)) {
+			return null;
+		}
 		List<String> reference = alias.isEmpty() ? List.of("", qualifier) : alias;
+		boolean useConsoleNamespace = !namespace.isEmpty() && reference.getFirst().isEmpty();
 		JdbcTable resolved = null;
 		for (JdbcTable candidate : tables) {
-			if (matchesTableAlias(type, candidate, reference)) {
+			if ((!useConsoleNamespace || namespace.equals(tableScope(candidate))) && matchesTableAlias(type, candidate, reference)) {
 				if (Objects.nonNull(resolved)) {
 					return null;
 				}
@@ -181,7 +206,8 @@ public final class JdbcSqlCompletion {
 		if (Objects.nonNull(resolved)) {
 			return resolved;
 		}
-		return Objects.nonNull(selected) && matchesTableAlias(type, selected, reference) ? selected : null;
+		return Objects.nonNull(selected) && (!useConsoleNamespace || namespace.equals(tableScope(selected)))
+			&& matchesTableAlias(type, selected, reference) ? selected : null;
 	}
 
 	/**
@@ -199,13 +225,13 @@ public final class JdbcSqlCompletion {
 	}
 
 	/**
-	 * 在当前语句中查找最近可见的 FROM/JOIN 别名。内层声明会遮蔽外层同名别名。
+	 * 在当前语句中查找最近可见的 FROM/JOIN 表引用。内层声明会遮蔽外层同名引用。
 	 *
 	 * @param type 当前数据库方言，用于识别字符串边界
 	 * @param sql 编辑器文本，允许 FROM 子句位于光标之后
 	 * @param caret 光标位置，用于确定当前语句
 	 * @param qualifier 光标前的限定符
-	 * @return 模式和表名，未声明或存在歧义时返回空列表
+	 * @return 模式和表名，未声明时返回空列表，存在歧义时返回空引用以阻止回退
 	 */
 	private static List<String> readTableAlias(DbType type, String sql, int caret, String qualifier) {
 		if (qualifier.isEmpty()) {
@@ -236,7 +262,8 @@ public final class JdbcSqlCompletion {
 					scopes.pop();
 				}
 			}
-			if (Objects.nonNull(aliases.group(3)) && matchesSqlName(type, qualifier, decodeAliasIdentifier(type, aliases.group(3)))) {
+			String exposedName = Objects.requireNonNullElse(aliases.group(3), Objects.toString(aliases.group(2), ""));
+			if (!exposedName.isEmpty() && matchesSqlName(type, qualifier, decodeAliasIdentifier(type, exposedName))) {
 				String schema = Objects.isNull(aliases.group(1)) ? "" : decodeAliasIdentifier(type, aliases.group(1));
 				scopeMatches.merge(scopes.peek(), List.of(schema, decodeAliasIdentifier(type, aliases.group(2))),
 					(previous, current) -> List.of());
@@ -248,7 +275,7 @@ public final class JdbcSqlCompletion {
 		for (int candidateScope : cursorScopes) {
 			List<String> match = scopeMatches.get(candidateScope);
 			if (Objects.nonNull(match)) {
-				return match;
+				return match.isEmpty() ? null : match;
 			}
 		}
 		return List.of();

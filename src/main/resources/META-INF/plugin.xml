@@ -10,7 +10,19 @@
         <ul>
             <li>数据库工作台支持七种 JDBC 数据库及 Redis、MongoDB 和 Elasticsearch，驱动解析不依赖 Java 插件。</li>
             <li>支持从 JDBC 表节点生成 MyBatis 代码，并提供连接配置文件导入和导出。</li>
-            <li>按宿主启用 Java Mapper 工具。有 Java 和原生专业数据库功能的宿主沿用原生 Database 窗口。</li>
+            <li>内置工作台可从同一数据源选择多张表批量生成 MyBatis，并在写入前报告重复的 Java 输出文件名。</li>
+            <li>生成的 Mapper 按数据库方言引用含空格的库名、Schema 名和表名。</li>
+            <li>默认仅将自增主键配置为生成键，手工赋值的复合主键会完整保留在 INSERT 中。</li>
+            <li>可在独立标签页用 AND 组合数据库端筛选条件，并排序、翻页和编辑表数据。新增行支持逐列填写，并可区分数据库默认值和 SQL NULL。</li>
+            <li>可导入或导出 CSV、查看只读 DDL，并预览或保存表结构比较生成的 SQL 草案。</li>
+            <li>支持为 MySQL、MariaDB 和 MongoDB 选择浏览的数据库，为 PostgreSQL 和 H2 选择 Schema。</li>
+            <li>SQL 控制台可执行光标所在的单条语句或显式选中的 SQL，估算计划仅接受一条语句。</li>
+            <li>从 MySQL 或 MariaDB 的库节点、PostgreSQL 或 H2 的 Schema 节点打开 SQL 控制台时，查询、估算计划和补全使用所选范围。</li>
+            <li>Redis 单机与 Cluster 支持在对象树过滤键并按游标翻页，打开控制台时沿用选中的逻辑库或主节点及过滤条件。</li>
+            <li>Redis 支持查看和维护键及其成员。整键删除会核对原内容，复合键快照超限或 Stream 有消费组时会拒绝删除。</li>
+            <li>MongoDB 可逐字段或使用 Extended JSON 新增文档，并可双击字段编辑。Elasticsearch 可通过 Query DSL 查询，也可双击结果行打开文档编辑。</li>
+            <li>刷新 Redis、MongoDB 和 Elasticsearch 的目标清单时保留原选择，目标消失后需重新选择。</li>
+            <li>宿主启用原生专业数据库功能时沿用原生 Database 窗口。Java Mapper 工具按宿主的 Java 集成独立启用。</li>
         </ul>
         <h4>0.0.3</h4>
         <ul>
@@ -83,6 +95,8 @@
         <toolWindow id="Workbench Database" anchor="right"
                     factoryClass="io.github.jinlongliao.mybatis.workbench.ui.WorkbenchDatabaseToolWindow"/>
         <applicationService serviceImplementation="io.github.jinlongliao.mybatis.workbench.setting.WorkbenchConnectionProfiles"/>
+        <fileEditorProvider implementation="io.github.jinlongliao.mybatis.workbench.ui.WorkbenchTablePreviewEditorProvider"/>
+        <fileEditorProvider implementation="io.github.jinlongliao.mybatis.workbench.ui.WorkbenchNoSqlObjectEditorProvider"/>
     </extensions>
 
 </idea-plugin>

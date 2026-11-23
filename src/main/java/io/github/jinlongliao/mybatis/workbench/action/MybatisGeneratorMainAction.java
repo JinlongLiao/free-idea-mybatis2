@@ -70,8 +70,9 @@ public class MybatisGeneratorMainAction extends AnAction {
 					Messages.getInformationIcon());
 				return;
 			}
-			String driverClass = selectedTable.getDataSource().getConnectionConfig().getDriverClass();
-			DbType dbType = resolveNativeDatabaseType(driverClass);
+			var connectionConfig = selectedTable.getDataSource().getConnectionConfig();
+			String driverClass = connectionConfig.getDriverClass();
+			DbType dbType = resolveNativeDatabaseType(connectionConfig.getUrl(), driverClass);
 			if (Objects.isNull(dbType)) {
 				Messages.showMessageDialog(message("native.generator.unsupported.driver", String.valueOf(driverClass)),
 					message("generate.mybatis"),
@@ -82,18 +83,25 @@ public class MybatisGeneratorMainAction extends AnAction {
 			if (StringUtils.isEmpty(qualifier)) {
 				qualifier = DasUtil.getCatalog(selectedTable.getDasObject());
 			}
-			generationTables.add(new GenerationTable(DbToolsUtils.buildIntellijTableInfo(selectedTable), dbType, qualifier));
+			generationTables.add(new GenerationTable(DbToolsUtils.buildIntellijTableInfo(selectedTable, dbType), dbType, qualifier));
 		}
 		new MybatisGeneratorMainUI(e.getProject(), generationTables);
 	}
 
 	/**
-	 * 根据原生连接配置识别生成器支持的数据库。
+	 * 从 JDBC URL 的协议段识别方言，缺少标准协议段时沿用驱动类名识别。
 	 *
+	 * @param url 原生连接地址，可能为空
 	 * @param driverClass 原生连接的 JDBC 驱动类名
 	 * @return 识别结果，驱动未知时为空
 	 */
-	private static DbType resolveNativeDatabaseType(String driverClass) {
+	private static DbType resolveNativeDatabaseType(String url, String driverClass) {
+		String normalizedUrl = Objects.toString(url, "").strip().toLowerCase(Locale.ROOT);
+		for (DbType dbType : DbType.values()) {
+			if (normalizedUrl.startsWith("jdbc:" + dbType.name().toLowerCase(Locale.ROOT) + ":")) {
+				return dbType;
+			}
+		}
 		if (Objects.isNull(driverClass)) {
 			return null;
 		}

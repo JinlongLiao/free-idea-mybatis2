@@ -2,7 +2,6 @@ package io.github.jinlongliao.mybatis.workbench.ui;
 
 import com.intellij.ide.plugins.PluginManagerCore;
 import com.intellij.ide.plugins.PluginModuleId;
-import com.intellij.openapi.extensions.PluginId;
 import com.intellij.openapi.project.DumbAware;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.wm.ToolWindow;
@@ -13,8 +12,12 @@ import org.jetbrains.annotations.NotNull;
 
 import kotlin.coroutines.Continuation;
 
+import java.util.Objects;
+
+import io.github.jinlongliao.mybatis.workbench.setting.MybatisSetting;
+
 /**
- * 在没有 Java 集成或原生专业数据库管理时，注册独立数据库窗口。
+ * 宿主的原生专业数据库管理未启用时，注册独立数据库窗口。
  *
  * @author liaojinlong
  * @since 2026/11/18 15:11
@@ -36,14 +39,16 @@ public final class WorkbenchDatabaseToolWindow implements ToolWindowFactory, Dum
 	}
 
 	/**
-	 * @return Java 插件已启用，可以注册 Mapper 扩展及表节点生成入口时为 true
+	 * 可选 Java 描述符启用时才注册 MyBatis 设置服务，与 Mapper 扩展使用同一宿主条件。
+	 *
+	 * @return Java/MyBatis 扩展已在当前宿主注册时为 true
 	 */
 	public static boolean isJavaAvailable() {
-		return PluginManagerCore.getPluginSet().isPluginEnabled(PluginId.getId("com.intellij.java"));
+		return Objects.nonNull(MybatisSetting.getInstance());
 	}
 
 	/**
-	 * Java 宿主在原生专业管理可用时沿用原生窗口。其他宿主保留独立工作台。
+	 * 宿主有原生专业数据库管理时沿用原生窗口，独立窗口的可见性与 Java 集成无关。
 	 *
 	 * @param project      将创建工具窗口的项目
 	 * @param continuation 平台的协程上下文，此处立即返回结果
@@ -51,7 +56,7 @@ public final class WorkbenchDatabaseToolWindow implements ToolWindowFactory, Dum
 	 */
 	@Override
 	public Object isApplicableAsync(@NotNull Project project, @NotNull Continuation<? super Boolean> continuation) {
-		return !isJavaAvailable() || !isNativeDatabaseAvailable();
+		return !isNativeDatabaseAvailable();
 	}
 
 	/**

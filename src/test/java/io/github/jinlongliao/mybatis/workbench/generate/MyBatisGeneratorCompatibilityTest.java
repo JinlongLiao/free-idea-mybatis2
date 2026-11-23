@@ -8,10 +8,14 @@ import io.github.jinlongliao.mybatis.workbench.database.JdbcResultCsv;
 import io.github.jinlongliao.mybatis.workbench.database.JdbcTableMetadata;
 import io.github.jinlongliao.mybatis.workbench.database.JdbcTableEditor;
 import io.github.jinlongliao.mybatis.workbench.database.JdbcSqlCompletion;
+import io.github.jinlongliao.mybatis.workbench.database.JdbcSqlStatementLocator;
 import io.github.jinlongliao.mybatis.workbench.database.JdbcTable;
 import io.github.jinlongliao.mybatis.workbench.database.JdbcTableDdl;
 import io.github.jinlongliao.mybatis.workbench.database.JdbcTableComparer;
 import io.github.jinlongliao.mybatis.workbench.database.JdbcTableRows;
+import io.github.jinlongliao.mybatis.workbench.database.JdbcTableFilterOperator;
+import io.github.jinlongliao.mybatis.workbench.database.JdbcTableQueryExpressionParser;
+import io.github.jinlongliao.mybatis.workbench.database.JdbcTableQueryOptions;
 import io.github.jinlongliao.mybatis.workbench.generate.plugin.DbRemarksCommentGenerator;
 import io.github.jinlongliao.mybatis.workbench.model.Config;
 import io.github.jinlongliao.mybatis.workbench.model.DbType;
@@ -21,6 +25,8 @@ import io.github.jinlongliao.mybatis.workbench.database.WorkbenchMongoConnection
 import io.github.jinlongliao.mybatis.workbench.database.NoSqlConnectionProfile;
 import io.github.jinlongliao.mybatis.workbench.database.NoSqlSourceType;
 import io.github.jinlongliao.mybatis.workbench.setting.WorkbenchConnectionProfiles;
+import io.github.jinlongliao.mybatis.workbench.ui.MybatisGeneratorMainUI;
+import io.github.jinlongliao.mybatis.workbench.util.StringUtils;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -43,16 +49,24 @@ import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.SQLException;
+import java.sql.Date;
+import java.sql.Time;
+import java.sql.Timestamp;
 import java.sql.Types;
 import java.text.MessageFormat;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 import java.util.Locale;
 import java.util.OptionalLong;
 import java.util.Properties;
 import java.util.ResourceBundle;
 import java.util.UUID;
 import java.util.regex.Pattern;
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.LocalDateTime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -97,6 +111,8 @@ class MyBatisGeneratorCompatibilityTest {
 		assertTrue(generated.contains("property=\"computedValue\""));
 		var writes = Pattern.compile("(?s)<(insert|update)\\b.*?</\\1>").matcher(generated).results().toList();
 		assertTrue(writes.stream().anyMatch(write -> "insert".equals(write.group(1))));
+		assertTrue(writes.stream().filter(write -> "insert".equals(write.group(1)))
+			.noneMatch(write -> write.group().contains("#{id")));
 		assertTrue(writes.stream().anyMatch(write -> "update".equals(write.group(1))));
 		assertTrue(writes.stream().allMatch(write -> write.group().contains("created_at")
 			&& !write.group().contains("computed_value")));
@@ -144,8 +160,77 @@ class MyBatisGeneratorCompatibilityTest {
 		}
 	}
 
+	/** 真实表名中的空格、标点及数字前缀不会写入非法的 Java 类型名。 */
+	@Test
+	void derivesValidJavaNamesFromDatabaseTables() {
+		assertEquals("StableFixture", StringUtils.dbStringToCamelStyle("STABLE_FIXTURE"));
+		assertEquals("OrderList", StringUtils.dbStringToCamelStyle("order\" list"));
+		assertEquals("Table2订单", StringUtils.dbStringToCamelStyle("2-订单"));
+		assertEquals("Table", StringUtils.dbStringToCamelStyle("__"));
+	}
+
 	/**
-	 * 在真实 H2 库中确认估算计划不会执行 DELETE，并拦截附带写操作的多语句输入。
+	 * 批量生成前识别跨模式同名表、规范化名称和派生 Example 类型冲突。
+	 *
+	 * @throws ReflectiveOperationException 无法调用批量生成预检时失败
+	 */
+	@Test
+	void detectsConflictingBatchJavaNamesBeforeGeneration() throws ReflectiveOperationException {
+		var first = sampleTable();
+		first.setTableName("stable fixture");
+		var second = sampleTable();
+		second.setTableName("stable_fixture");
+		var check = MybatisGeneratorMainUI.class.getDeclaredMethod("findConflictingBatchModelName", List.class, boolean.class, String.class);
+		check.setAccessible(true);
+		assertEquals("StableFixture", check.invoke(null, List.of(new GenerationTable(first, DbType.H2, "FIRST"),
+			new GenerationTable(second, DbType.H2, "SECOND")), false, null));
+		second.setTableName("stable fixture");
+		assertEquals("StableFixture", check.invoke(null, List.of(new GenerationTable(first, DbType.H2, "FIRST"),
+			new GenerationTable(second, DbType.H2, "SECOND")), false, null));
+		second.setTableName("different_fixture");
+		assertEquals("", check.invoke(null, List.of(new GenerationTable(first, DbType.H2, "FIRST"),
+			new GenerationTable(second, DbType.H2, "SECOND")), false, null));
+		second.setTableName("stable_fixture_example");
+		var firstTable = new GenerationTable(first, DbType.H2, "FIRST");
+		var secondTable = new GenerationTable(second, DbType.H2, "SECOND");
+		assertEquals("", check.invoke(null, List.of(firstTable, secondTable), false, null));
+		assertEquals("StableFixtureExample", check.invoke(null, List.of(firstTable, secondTable), true, null));
+		assertEquals("StableFixtureExample", check.invoke(null, List.of(secondTable, firstTable), true, null));
+		second.setTableName("stable_fixture_mapper");
+		assertEquals("", check.invoke(null, List.of(firstTable, secondTable), false, null));
+		assertEquals("StableFixtureMapper", check.invoke(null, List.of(firstTable, secondTable), false, "Mapper"));
+	}
+
+	/**
+	 * Mapper 引用含空格的库、模式和表名，SQLite 文件库可省略模式前缀。
+	 *
+	 * @param workspace 测试输出目录
+	 * @throws Exception 生成 Mapper 或读取文件失败
+	 */
+	@Test
+	void escapesDatabaseAndTableIdentifierDelimiters(@TempDir Path workspace) throws Exception {
+		for (DbType type : List.of(DbType.MySQL, DbType.MariaDB, DbType.PostgreSQL, DbType.H2, DbType.SQLite, DbType.Oracle)) {
+			String delimiter = type == DbType.MySQL || type == DbType.MariaDB ? "`" : "\"";
+			String nameDelimiter = type == DbType.Oracle ? "" : delimiter;
+			Path javaOutput = Files.createTempDirectory(workspace, "java-");
+			Path xmlOutput = Files.createTempDirectory(workspace, "xml-");
+			var table = sampleTable();
+			table.setTableName("order" + nameDelimiter + " list");
+			String qualifier = type == DbType.SQLite ? null : "group" + nameDelimiter + " 2";
+			var source = new GenerationTable(table, type, qualifier);
+			var generator = buildSampleGenerator(javaOutput, xmlOutput, source);
+			assertTrue(IdeaTableConnectionFactory.generateMapperFiles(generator, table).isEmpty());
+			String mapper = Files.readString(xmlOutput.resolve("fixture/SampleMapper.xml"));
+			String expected = delimiter + table.getTableName().replace(delimiter, delimiter.repeat(2)) + delimiter;
+			if (Objects.nonNull(qualifier)) {
+				expected = delimiter + qualifier.replace(delimiter, delimiter.repeat(2)) + delimiter + "." + expected;
+			}
+			assertTrue(mapper.contains(expected));
+		}
+	}
+
+	/**
+	 * 在真实 H2 库中确认估算计划不会执行 DELETE，并按 SQL 词法处理字符串分号、前置注释和多语句输入。
 	 *
 	 * @throws Exception JDBC 初始化、查询或执行计划失败
 	 */
@@ -159,17 +244,83 @@ class MyBatisGeneratorCompatibilityTest {
 			database.executeSql("INSERT INTO sample (id) VALUES (1)", 10, 5);
 
 			assertTrue(!database.explainSql(DbType.H2, "DELETE FROM sample WHERE id = 1;", 10, 5).rows().isEmpty());
+			assertTrue(!database.explainSql(DbType.H2, "-- leading comment\nSELECT 'a;b' FROM sample", 10, 5)
+				.rows().isEmpty());
+			assertEquals("SELECT 'a;b' FROM sample", JdbcSqlStatementLocator.singleStatementForExplain(DbType.H2,
+				"/* leading comment */ SELECT 'a;b' FROM sample;"));
+			assertTrue(!database.explainSql(DbType.H2, "/* leading comment */ SELECT 'a;b' FROM sample;", 10, 5)
+				.rows().isEmpty());
+			assertThrows(IllegalArgumentException.class,
+				() -> JdbcSqlStatementLocator.singleStatementForExplain(DbType.H2, "SELECT 1;;"));
 			var english = ResourceBundle.getBundle("messages.WorkbenchBundle", Locale.ROOT);
 			var chinese = ResourceBundle.getBundle("messages.WorkbenchBundle", Locale.SIMPLIFIED_CHINESE);
 			String script = "SELECT id FROM sample; DELETE FROM sample";
-			assertEquals("Select one SQL statement that supports an estimated plan. Semicolons are only allowed at the end.",
+			assertEquals("Select one SELECT, WITH, INSERT, UPDATE, or DELETE statement that supports an estimated plan. Multiple statements and client-side script delimiters are not supported.",
 				assertThrows(IllegalArgumentException.class,
 					() -> database.explainSql(DbType.H2, script, 10, 5, english::getString)).getMessage());
-			assertEquals("请选择一条支持估算计划的 SQL。分号只能出现在语句末尾。",
+			assertEquals("请选择一条支持估算计划的 SELECT、WITH、INSERT、UPDATE 或 DELETE 语句。不支持多条语句或客户端脚本分隔指令。",
 				assertThrows(IllegalArgumentException.class,
 					() -> database.explainSql(DbType.H2, script, 10, 5, chinese::getString)).getMessage());
 			assertEquals(List.of(List.of("1")), database.executeSql("SELECT id FROM sample", 10, 5).rows());
+		String cursorScript = "SELECT id FROM sample; INSERT INTO sample VALUES (2);";
+		String selectedFirst = JdbcSqlStatementLocator.locateAtCaret(DbType.H2, cursorScript,
+			cursorScript.indexOf("SELECT"));
+		assertEquals("SELECT id FROM sample", selectedFirst);
+		database.executeSql(selectedFirst, 10, 5);
+		assertEquals(List.of(List.of("1")), database.executeSql("SELECT id FROM sample ORDER BY id", 10, 5).rows());
+		String selectedSecond = JdbcSqlStatementLocator.locateAtCaret(DbType.H2, cursorScript,
+			cursorScript.indexOf("INSERT"));
+		assertEquals("INSERT INTO sample VALUES (2)", selectedSecond);
 		}
+	}
+
+	/**
+	 * 验证无选区控制台定位只返回光标所在 SQL，词法引号与注释中的分号不切句，脚本语法边界拒绝猜测。
+	 */
+	@Test
+	void locatesOnlyTheSqlStatementAtCaret() {
+		String script = "SELECT 'a;b' AS value;\n  INSERT INTO sample VALUES (1);";
+		int firstSeparator = script.indexOf(";\n");
+		int secondStart = script.indexOf("INSERT");
+		assertEquals("SELECT 'a;b' AS value", JdbcSqlStatementLocator.locateAtCaret(DbType.H2, script,
+			script.indexOf("SELECT")));
+		assertEquals("SELECT 'a;b' AS value", JdbcSqlStatementLocator.locateAtCaret(DbType.H2, script,
+			firstSeparator));
+		assertThrows(IllegalArgumentException.class,
+			() -> JdbcSqlStatementLocator.locateAtCaret(DbType.H2, script, firstSeparator + 1));
+		assertEquals("INSERT INTO sample VALUES (1)", JdbcSqlStatementLocator.locateAtCaret(DbType.H2, script,
+			secondStart));
+		assertEquals("INSERT INTO sample VALUES (1)", JdbcSqlStatementLocator.locateAtCaret(DbType.H2, script,
+			script.length()));
+
+		String commented = "-- ; leading comment\nSELECT 1 /* ; inline comment */; -- gap\nSELECT 2";
+		assertEquals("-- ; leading comment\nSELECT 1 /* ; inline comment */",
+			JdbcSqlStatementLocator.locateAtCaret(DbType.H2, commented, commented.indexOf("SELECT 1")));
+		assertThrows(IllegalArgumentException.class,
+			() -> JdbcSqlStatementLocator.locateAtCaret(DbType.H2, commented, commented.indexOf("-- gap") + 2));
+		assertEquals("-- gap\nSELECT 2", JdbcSqlStatementLocator.locateAtCaret(DbType.H2, commented,
+			commented.lastIndexOf("SELECT 2")));
+		assertEquals("SELECT $$a;b$$", JdbcSqlStatementLocator.locateAtCaret(DbType.PostgreSQL,
+			"SELECT $$a;b$$; SELECT 2", 2));
+		assertEquals("SELECT q'[a;b]' FROM dual", JdbcSqlStatementLocator.locateAtCaret(DbType.Oracle,
+			"SELECT q'[a;b]' FROM dual; SELECT 2", 2));
+		assertEquals("SELECT [a;b]", JdbcSqlStatementLocator.locateAtCaret(DbType.SqlServer,
+			"SELECT [a;b]; SELECT 2", 2));
+		assertEquals("SELECT `a;b`", JdbcSqlStatementLocator.locateAtCaret(DbType.MySQL,
+			"SELECT `a;b`; SELECT 2", 2));
+		assertThrows(IllegalArgumentException.class,
+			() -> JdbcSqlStatementLocator.locateAtCaret(DbType.SqlServer, "SELECT 1\nGO\nSELECT 2", 1));
+		assertThrows(IllegalArgumentException.class,
+			() -> JdbcSqlStatementLocator.locateAtCaret(DbType.MySQL, "DELIMITER //\nSELECT 1//", 15));
+		assertThrows(IllegalArgumentException.class,
+			() -> JdbcSqlStatementLocator.locateAtCaret(DbType.MySQL, "SELECT /*! ; DELETE FROM sample */ 1", 2));
+		assertThrows(IllegalArgumentException.class,
+			() -> JdbcSqlStatementLocator.locateAtCaret(DbType.MariaDB, "SELECT /*M! ; DELETE FROM sample */ 1", 2));
+		assertThrows(IllegalArgumentException.class,
+			() -> JdbcSqlStatementLocator.locateAtCaret(DbType.SQLite,
+				"CREATE TRIGGER sample_trigger AFTER INSERT ON sample BEGIN SELECT 1; SELECT 2; END;", 20));
+		assertThrows(IllegalArgumentException.class,
+			() -> JdbcSqlStatementLocator.locateAtCaret(DbType.H2, "SELECT 'backslash\\' ; SELECT 2", 2));
 	}
 
 	/**
@@ -188,6 +339,26 @@ class MyBatisGeneratorCompatibilityTest {
 			var connection = database.connection();
 			var table = JdbcTableMetadata.listTables(connection.getMetaData(), connection.getCatalog(), "PUBLIC").stream()
 				.filter(candidate -> candidate.name().equals("SAMPLE")).findFirst().orElseThrow();
+			database.executeSql("CREATE TABLE multi_sample (id INTEGER PRIMARY KEY, label VARCHAR(40), bucket INTEGER NOT NULL)",
+				10, 5);
+		database.executeSql("INSERT INTO multi_sample SELECT X, CASE WHEN MOD(X, 2) = 0 THEN 'tea AND cake' "
+			+ "ELSE 'other' END, CASE WHEN X <= 120 THEN 1 ELSE 2 END FROM SYSTEM_RANGE(1, 220)", 10, 5);
+		var multiTable = JdbcTableMetadata.listTables(connection.getMetaData(), connection.getCatalog(), "PUBLIC").stream()
+			.filter(candidate -> candidate.name().equals("MULTI_SAMPLE")).findFirst().orElseThrow();
+		var multiOptions = JdbcTableQueryExpressionParser.parse(
+			"ID > 0 AND LABEL = 'tea AND cake' AND BUCKET >= 1", "ID ASC",
+			JdbcTableMetadata.readGenerationTable(connection.getMetaData(), DbType.H2, multiTable).tableInfo()
+				.getColumnInfos().stream().map(IntellijColumnInfo::getName).toList(), key -> key);
+		var multiFirst = JdbcTableEditor.previewTableRows(database, DbType.H2, multiTable, multiOptions, key -> key);
+		assertEquals(100, multiFirst.result().rows().size());
+		assertEquals(List.of("2", "tea AND cake", "1"), multiFirst.result().rows().getFirst());
+		assertTrue(multiFirst.hasNextPage());
+		var multiSecond = JdbcTableEditor.readNextTableRows(database, DbType.H2, multiFirst, key -> key);
+		assertEquals(10, multiSecond.result().rows().size());
+		assertFalse(multiSecond.hasNextPage());
+		assertEquals(List.of("220", "tea AND cake", "2"), multiSecond.result().rows().getLast());
+		assertEquals(multiFirst.result().rows(), JdbcTableEditor.readPreviousTableRows(database, DbType.H2,
+			multiSecond, key -> key).result().rows());
 			var first = JdbcTableEditor.previewTableRows(database, DbType.H2, table);
 			assertEquals(List.of("1", "100"), first.result().rows().getLast());
 			var second = JdbcTableEditor.readNextTableRows(database, DbType.H2, first);
@@ -207,6 +378,302 @@ class MyBatisGeneratorCompatibilityTest {
 			assertThrows(SQLException.class, () -> JdbcTableEditor.readNextTableRows(database, DbType.H2, third));
 			database.executeSql("DELETE FROM sample WHERE bucket = 2 AND item > 200", 10, 5);
 			assertTrue(JdbcTableEditor.readNextTableRows(database, DbType.H2, second).result().rows().isEmpty());
+		}
+	}
+
+	/**
+	 * 验证服务端条件值绑定、非主键排序的复合 keyset 续读、排序列边界和空条件有界读取。
+	 *
+	 * @throws Exception 测试专用 H2 查询或元数据读取失败
+	 */
+	@Test
+	void filtersAndSortsTablePreviewWithBoundedKeysetPages() throws Exception {
+		Path driver = Path.of(System.getProperty("workbench.estimatedPlanTestDriver"));
+		try (var database = new JdbcDriverConnection(List.of(driver), "org.h2.Driver", "jdbc:h2:mem:table-query-options",
+			new Properties())) {
+			database.executeSql("CREATE TABLE sample (id INTEGER PRIMARY KEY, bucket INTEGER NOT NULL, label VARCHAR(20))",
+				10, 5);
+			database.executeSql("INSERT INTO sample SELECT X, CASE WHEN X <= 120 THEN 1 ELSE 2 END, "
+				+ "CASE WHEN MOD(X, 2) = 0 THEN 'even' ELSE 'odd' END FROM SYSTEM_RANGE(1, 220)", 10, 5);
+			var connection = database.connection();
+			var table = JdbcTableMetadata.listTables(connection.getMetaData(), connection.getCatalog(), "PUBLIC").stream()
+				.filter(candidate -> candidate.name().equals("SAMPLE")).findFirst().orElseThrow();
+			var options = new JdbcTableQueryOptions("LABEL", JdbcTableFilterOperator.EQUALS, "odd", "BUCKET", true);
+			var first = JdbcTableEditor.previewTableRows(database, DbType.H2, table, options, key -> key);
+			assertEquals(100, first.result().rows().size());
+		assertEquals(List.of("121", "2", "odd"), first.result().rows().getFirst());
+		assertEquals(List.of("99", "1", "odd"), first.result().rows().getLast());
+			assertTrue(first.hasNextPage());
+			var second = JdbcTableEditor.readNextTableRows(database, DbType.H2, first, key -> key);
+		assertEquals(List.of("101", "1", "odd"), second.result().rows().getFirst());
+		assertEquals(List.of("119", "1", "odd"), second.result().rows().getLast());
+			assertFalse(second.hasNextPage());
+			assertEquals(options, second.queryOptions());
+			assertEquals(first.result().rows(), JdbcTableEditor.readPreviousTableRows(database, DbType.H2, second,
+				key -> key).result().rows());
+
+			var injected = new JdbcTableQueryOptions("LABEL", JdbcTableFilterOperator.EQUALS,
+				"odd' OR 1=1 --", "", false);
+			assertTrue(JdbcTableEditor.previewTableRows(database, DbType.H2, table, injected, key -> key).result().rows().isEmpty());
+			var prefixLike = JdbcTableQueryExpressionParser.parse("LABEL LIKE 'od%'", "",
+				first.result().columnLabels(), key -> key);
+			var prefixLikePage = JdbcTableEditor.previewTableRows(database, DbType.H2, table, prefixLike, key -> key);
+			assertEquals(100, prefixLikePage.result().rows().size());
+			assertTrue(prefixLikePage.hasNextPage());
+			assertTrue(prefixLikePage.result().rows().stream().allMatch(row -> row.getLast().equals("odd")));
+			var prefixLikeNextPage = JdbcTableEditor.readNextTableRows(database, DbType.H2, prefixLikePage, key -> key);
+			assertEquals(10, prefixLikeNextPage.result().rows().size());
+			assertFalse(prefixLikeNextPage.hasNextPage());
+			assertTrue(prefixLikeNextPage.result().rows().stream().allMatch(row -> row.getLast().equals("odd")));
+			assertEquals(prefixLikePage.result().rows(), JdbcTableEditor.readPreviousTableRows(database, DbType.H2,
+				prefixLikeNextPage, key -> key).result().rows());
+			var inOptions = JdbcTableQueryExpressionParser.parse("LABEL IN ('odd', 'missing')", "ID ASC",
+				first.result().columnLabels(), key -> key);
+			var inFirstPage = JdbcTableEditor.previewTableRows(database, DbType.H2, table, inOptions, key -> key);
+			assertEquals(100, inFirstPage.result().rows().size());
+			assertTrue(inFirstPage.hasNextPage());
+			assertTrue(inFirstPage.result().rows().stream().allMatch(row -> row.getLast().equals("odd")));
+			var inSecondPage = JdbcTableEditor.readNextTableRows(database, DbType.H2, inFirstPage, key -> key);
+			assertEquals(10, inSecondPage.result().rows().size());
+			assertFalse(inSecondPage.hasNextPage());
+			assertEquals(inFirstPage.result().rows(), JdbcTableEditor.readPreviousTableRows(database, DbType.H2,
+				inSecondPage, key -> key).result().rows());
+			var inInjection = JdbcTableQueryExpressionParser.parse("LABEL IN ('odd'' OR 1=1 --')", "",
+				first.result().columnLabels(), key -> key);
+			assertTrue(JdbcTableEditor.previewTableRows(database, DbType.H2, table, inInjection, key -> key)
+				.result().rows().isEmpty());
+			var numericPrefixLike = JdbcTableQueryExpressionParser.parse("BUCKET LIKE '1%'", "",
+				first.result().columnLabels(), key -> key);
+			assertEquals("table.filter.like.requires.text.column", assertThrows(SQLException.class,
+				() -> JdbcTableEditor.previewTableRows(database, DbType.H2, table, numericPrefixLike, key -> key))
+				.getMessage());
+			var noSortNullable = new JdbcTableQueryOptions("", JdbcTableFilterOperator.EQUALS, "", "LABEL", false);
+			assertEquals("table.sort.requires.non.null.scalar.column", assertThrows(SQLException.class,
+				() -> JdbcTableEditor.previewTableRows(database, DbType.H2, table, noSortNullable, key -> key))
+				.getMessage());
+			var noFilter = JdbcTableEditor.previewTableRows(database, DbType.H2, table);
+			assertEquals(100, noFilter.result().rows().size());
+			assertTrue(noFilter.hasNextPage());
+
+		database.executeSql("CREATE TABLE null_sample (id INTEGER PRIMARY KEY, text_value VARCHAR(20))", 10, 5);
+		database.executeSql("INSERT INTO null_sample VALUES (1, NULL), (2, ''), (3, 'present')", 10, 5);
+		var nullTable = JdbcTableMetadata.listTables(connection.getMetaData(), connection.getCatalog(), "PUBLIC").stream()
+			.filter(candidate -> candidate.name().equals("NULL_SAMPLE")).findFirst().orElseThrow();
+		var nullFilter = new JdbcTableQueryOptions("TEXT_VALUE", JdbcTableFilterOperator.IS_NULL, "", "", false);
+		assertEquals(List.of("1"), JdbcTableEditor.previewTableRows(database, DbType.H2, nullTable, nullFilter,
+			key -> key).result().rows().stream().map(row -> row.getFirst()).toList());
+		var notNullFilter = new JdbcTableQueryOptions("TEXT_VALUE", JdbcTableFilterOperator.IS_NOT_NULL, "", "", false);
+		assertEquals(List.of("2", "3"), JdbcTableEditor.previewTableRows(database, DbType.H2, nullTable, notNullFilter,
+			key -> key).result().rows().stream().map(row -> row.getFirst()).toList());
+		var emptyValueFilter = new JdbcTableQueryOptions("TEXT_VALUE", JdbcTableFilterOperator.EQUALS, "", "", false);
+		assertEquals(List.of("2"), JdbcTableEditor.previewTableRows(database, DbType.H2, nullTable, emptyValueFilter,
+			key -> key).result().rows().stream().map(row -> row.getFirst()).toList());
+		var inEmptyString = JdbcTableQueryExpressionParser.parse("TEXT_VALUE IN ('')", "",
+			List.of("ID", "TEXT_VALUE"), key -> key);
+		assertEquals(List.of("2"), JdbcTableEditor.previewTableRows(database, DbType.H2, nullTable, inEmptyString,
+			key -> key).result().rows().stream().map(row -> row.getFirst()).toList());
+
+		database.executeSql("CREATE TABLE temporal_sample (id INTEGER PRIMARY KEY, event_date DATE NOT NULL, "
+			+ "event_time TIME NOT NULL, event_timestamp TIMESTAMP NOT NULL)", 10, 5);
+		try (var insert = connection.prepareStatement("INSERT INTO temporal_sample VALUES (?, ?, ?, ?)")) {
+			for (int index = 0; index < 220; index++) {
+				insert.setInt(1, index + 1);
+				insert.setDate(2, Date.valueOf(LocalDate.of(2026, 1, 1).plusDays(index)));
+				insert.setTime(3, Time.valueOf(LocalTime.MIDNIGHT.plusSeconds(index)));
+				insert.setTimestamp(4, Timestamp.valueOf(LocalDateTime.of(2026, 1, 1, 0, 0).plusSeconds(index)));
+				insert.executeUpdate();
+			}
+		}
+		var temporalTable = JdbcTableMetadata.listTables(connection.getMetaData(), connection.getCatalog(), "PUBLIC").stream()
+			.filter(candidate -> candidate.name().equals("TEMPORAL_SAMPLE")).findFirst().orElseThrow();
+		for (String temporalColumn : List.of("EVENT_DATE", "EVENT_TIME", "EVENT_TIMESTAMP")) {
+			var temporalOptions = new JdbcTableQueryOptions("", JdbcTableFilterOperator.EQUALS, "", temporalColumn, true);
+			var temporalFirst = JdbcTableEditor.previewTableRows(database, DbType.H2, temporalTable, temporalOptions,
+				key -> key);
+			assertEquals("220", temporalFirst.result().rows().getFirst().getFirst());
+			assertEquals("121", temporalFirst.result().rows().getLast().getFirst());
+			var temporalSecond = JdbcTableEditor.readNextTableRows(database, DbType.H2, temporalFirst, key -> key);
+			assertEquals("120", temporalSecond.result().rows().getFirst().getFirst());
+			assertEquals(temporalFirst.result().rows(), JdbcTableEditor.readPreviousTableRows(database, DbType.H2,
+				temporalSecond, key -> key).result().rows());
+		}
+		}
+	}
+
+	/**
+	 * 验证工作台 WHERE/ORDER BY 文本只解析受支持的有界 AND 条件，并保留参数绑定与列白名单边界。
+	 */
+	@Test
+	void parsesBoundedTableQueryExpressions() {
+		List<String> columns = List.of("NAME", "QUANTITY", "CREATED_AT", "tick`name", "bracket]name", "double\"name",
+			"and name");
+		var escapedValue = JdbcTableQueryExpressionParser.parse("name = 'O''Brien'", "created_at DESC",
+			columns, key -> key);
+		assertEquals("NAME", escapedValue.filterColumn());
+		assertEquals(JdbcTableFilterOperator.EQUALS, escapedValue.filterOperator());
+		assertEquals("O'Brien", escapedValue.filterValue());
+		assertEquals("CREATED_AT", escapedValue.sortColumn());
+		assertTrue(escapedValue.sortDescending());
+
+		var nullCondition = JdbcTableQueryExpressionParser.parse("NAME IS NOT NULL", "", columns, key -> key);
+		assertEquals(JdbcTableFilterOperator.IS_NOT_NULL, nullCondition.filterOperator());
+		var ascending = JdbcTableQueryExpressionParser.parse("QUANTITY >= 10", "CREATED_AT", columns, key -> key);
+		assertEquals("10", ascending.filterValue());
+		assertFalse(ascending.sortDescending());
+		var mysqlQuoted = JdbcTableQueryExpressionParser.parse("`tick``name` = 'value'", "[bracket]]name] DESC",
+			columns, key -> key);
+		assertEquals("tick`name", mysqlQuoted.filterColumn());
+		assertEquals("bracket]name", mysqlQuoted.sortColumn());
+		assertTrue(mysqlQuoted.sortDescending());
+		var sqlServerQuoted = JdbcTableQueryExpressionParser.parse("[bracket]]name] = 'x'", "\"double\"\"name\" ASC",
+			columns, key -> key);
+		assertEquals("bracket]name", sqlServerQuoted.filterColumn());
+		assertEquals("double\"name", sqlServerQuoted.sortColumn());
+		var prefixLike = JdbcTableQueryExpressionParser.parse("NAME LIKE 'O''Brien%'", "", columns, key -> key);
+		assertEquals(JdbcTableFilterOperator.PREFIX_LIKE, prefixLike.filterOperator());
+		assertEquals("O'Brien%", prefixLike.filterValue());
+		var inList = JdbcTableQueryExpressionParser.parse("NAME IN ('O''Brien', 'comma,value', 12)", "",
+			columns, key -> key);
+		assertEquals(JdbcTableFilterOperator.IN, inList.filterOperator());
+		assertEquals(List.of("O'Brien", "comma,value", "12"), inList.filterValues());
+		assertEquals(inList, JdbcTableQueryExpressionParser.parse(
+			JdbcTableQueryExpressionParser.formatWhereExpression(inList), "", columns, key -> key));
+		assertThrows(UnsupportedOperationException.class, () -> inList.filterValues().add("mutated"));
+		var inListWithEmptyString = JdbcTableQueryExpressionParser.parse("NAME IN ('', 'value')", "",
+			columns, key -> key);
+		assertEquals(List.of("", "value"), inListWithEmptyString.filterValues());
+		assertEquals(inListWithEmptyString, JdbcTableQueryExpressionParser.parse(
+			JdbcTableQueryExpressionParser.formatWhereExpression(inListWithEmptyString), "", columns, key -> key));
+		var multiCondition = JdbcTableQueryExpressionParser.parse(
+			"NAME = 'tea AND cake' AND QUANTITY IN (1, '2') AND CREATED_AT IS NOT NULL", "",
+			columns, key -> key);
+		assertEquals(3, multiCondition.filters().size());
+		assertEquals("tea AND cake", multiCondition.filters().getFirst().value());
+		assertEquals(List.of("1", "2"), multiCondition.filters().get(1).values());
+		assertEquals(multiCondition, JdbcTableQueryExpressionParser.parse(
+			JdbcTableQueryExpressionParser.formatWhereExpression(multiCondition), "", columns, key -> key));
+		var quotedAnd = JdbcTableQueryExpressionParser.parse(
+			"[bracket]]name] = 'a'' AND b' AND `tick``name` = 'left AND right' AND \"and name\" = 'x'",
+			"", columns, key -> key);
+		assertEquals("a' AND b", quotedAnd.filters().getFirst().value());
+		assertEquals("left AND right", quotedAnd.filters().get(1).value());
+		assertEquals("and name", quotedAnd.filters().getLast().column());
+
+		assertThrows(IllegalArgumentException.class,
+			() -> JdbcTableQueryExpressionParser.parse("unknown = 'x'", "", columns, key -> key));
+		assertThrows(IllegalArgumentException.class,
+			() -> JdbcTableQueryExpressionParser.parse("QUANTITY > 1 AND 1=1", "", columns, key -> key));
+		for (String invalidAnd : List.of("AND NAME = 'x'", "NAME = 'x' AND", "NAME = 'x' AND AND QUANTITY > 1",
+			"NAME = 'x' OR QUANTITY > 1", "(NAME = 'x') AND QUANTITY > 1", "NAME = 'x'; AND QUANTITY > 1",
+			"NAME = 'unterminated AND QUANTITY > 1", "NAME = 'x' -- comment\n AND QUANTITY > 1")) {
+			assertThrows(IllegalArgumentException.class,
+				() -> JdbcTableQueryExpressionParser.parse(invalidAnd, "", columns, key -> key));
+		}
+		String oversizedCombinedIn = "NAME IN (" + String.join(",", Collections.nCopies(51, "'x'"))
+			+ ") AND QUANTITY IN (" + String.join(",", Collections.nCopies(50, "'y'")) + ")";
+		assertThrows(IllegalArgumentException.class,
+			() -> JdbcTableQueryExpressionParser.parse(oversizedCombinedIn, "", columns, key -> key));
+		String tooManyConditions = String.join(" AND ", Collections.nCopies(
+			JdbcTableQueryOptions.MAX_FILTER_CONDITIONS + 1, "NAME IS NOT NULL"));
+		assertThrows(IllegalArgumentException.class,
+			() -> JdbcTableQueryExpressionParser.parse(tooManyConditions, "", columns, key -> key));
+		assertThrows(IllegalArgumentException.class,
+			() -> JdbcTableQueryExpressionParser.parse("", "CREATED_AT DESC, NAME", columns, key -> key));
+		assertThrows(IllegalArgumentException.class,
+			() -> JdbcTableQueryExpressionParser.parse("`tick` = 'x'", "", columns, key -> key));
+		assertThrows(IllegalArgumentException.class,
+			() -> JdbcTableQueryExpressionParser.parse("", "[bracket]name DESC", columns, key -> key));
+		for (String invalidLike : List.of("NAME LIKE '%prefix'", "NAME LIKE '%'", "NAME LIKE 'pre%fix%'",
+			"NAME LIKE 'pre_fix%'", "NAME LIKE '[ab]%'", "NAME LIKE '[^a]%'", "NAME LIKE 'pre\\\\fix%'",
+			"NAME LIKE prefix%")) {
+			assertThrows(IllegalArgumentException.class,
+				() -> JdbcTableQueryExpressionParser.parse(invalidLike, "", columns, key -> key));
+		}
+		for (String invalidIn : List.of("NAME IN ()", "NAME IN ('a',, 'b')", "NAME IN ('a',)",
+			"NAME IN (NULL)", "NAME IN ('unterminated)", "NAME IN ('x'")) {
+			assertThrows(IllegalArgumentException.class,
+				() -> JdbcTableQueryExpressionParser.parse(invalidIn, "", columns, key -> key));
+		}
+		String oversizedIn = "NAME IN (" + String.join(", ", Collections.nCopies(
+			JdbcTableQueryOptions.MAX_IN_VALUES + 1, "'value'")) + ")";
+		assertThrows(IllegalArgumentException.class,
+			() -> JdbcTableQueryExpressionParser.parse(oversizedIn, "", columns, key -> key));
+		String maximumIn = "NAME IN (" + String.join(", ", Collections.nCopies(
+			JdbcTableQueryOptions.MAX_IN_VALUES, "'value'")) + ")";
+		assertEquals(JdbcTableQueryOptions.MAX_IN_VALUES,
+			JdbcTableQueryExpressionParser.parse(maximumIn, "", columns, key -> key).filterValues().size());
+	}
+
+	/**
+	 * 验证 SQLite JDBC 对 INTEGER PRIMARY KEY 的 nullable 元数据偏差不会关闭后续有界分页。
+	 *
+	 * @throws Exception SQLite 测试驱动或分页查询失败
+	 */
+	@Test
+	void continuesSqliteIntegerPrimaryKeyTablePages() throws Exception {
+		Path driver = Path.of(System.getProperty("workbench.sqliteMigrationTestDriver"));
+		try (var database = new JdbcDriverConnection(List.of(driver), "org.sqlite.JDBC", "jdbc:sqlite::memory:",
+			new Properties())) {
+			database.executeSql("CREATE TABLE sample (id INTEGER PRIMARY KEY, bucket INTEGER NOT NULL, label TEXT)", 10, 5);
+			database.executeSql("WITH RECURSIVE seq(value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM seq WHERE value < 220) "
+				+ "INSERT INTO sample SELECT value, value % 3, CASE WHEN value % 2 = 0 THEN 'even' ELSE 'odd' END FROM seq",
+				10, 5);
+			var connection = database.connection();
+			var table = JdbcTableMetadata.listTables(connection.getMetaData(), connection.getCatalog(), null).stream()
+				.filter(candidate -> candidate.name().equals("sample")).findFirst().orElseThrow();
+			var options = new JdbcTableQueryOptions("label", JdbcTableFilterOperator.EQUALS, "odd", "bucket", true);
+			var first = JdbcTableEditor.previewTableRows(database, DbType.SQLite, table, options, key -> key);
+			assertEquals(100, first.result().rows().size());
+			assertTrue(first.hasNextPage());
+			var second = JdbcTableEditor.readNextTableRows(database, DbType.SQLite, first, key -> key);
+			assertTrue(second.result().rows().size() > 0);
+		}
+	}
+
+	/**
+	 * 验证新增行的默认值、空字符串和 SQL NULL 语义、重复主键拒绝、旧快照删除保护及事务状态恢复。
+	 *
+	 * @throws Exception H2 隔离数据库初始化或写入失败
+	 */
+	@Test
+	void insertsAndDeletesTableRowsWithSnapshotProtection() throws Exception {
+		Path driver = Path.of(System.getProperty("workbench.estimatedPlanTestDriver"));
+		try (var database = new JdbcDriverConnection(List.of(driver), "org.h2.Driver", "jdbc:h2:mem:table-row-mutations",
+			new Properties())) {
+			database.executeSql("CREATE TABLE sample (id INTEGER PRIMARY KEY, label VARCHAR(20) DEFAULT 'fallback', "
+				+ "quantity INTEGER NOT NULL)", 10, 5);
+			database.executeSql("INSERT INTO sample (id, label, quantity) VALUES (1, 'old', 1), (2, 'keep', 2)", 10, 5);
+			var connection = database.connection();
+			var table = JdbcTableMetadata.listTables(connection.getMetaData(), connection.getCatalog(), "PUBLIC").stream()
+				.filter(candidate -> candidate.name().equals("SAMPLE")).findFirst().orElseThrow();
+			var page = JdbcTableEditor.previewTableRows(database, DbType.H2, table);
+			JdbcTableEditor.insertTableRow(connection, DbType.H2, page, "{\"ID\":3,\"QUANTITY\":9}", key -> key);
+			assertTrue(connection.getAutoCommit());
+			var inserted = JdbcTableEditor.previewTableRows(database, DbType.H2, table);
+			assertEquals(List.of("3", "fallback", "9"), inserted.result().rows().getLast());
+			JdbcTableEditor.insertTableRow(connection, DbType.H2, inserted, "{\"ID\":4,\"LABEL\":null,\"QUANTITY\":10}",
+				key -> key);
+			var withNull = JdbcTableEditor.previewTableRows(database, DbType.H2, table);
+			assertEquals(Arrays.asList("4", null, "10"), withNull.result().rows().getLast());
+			JdbcTableEditor.insertTableRow(connection, DbType.H2, withNull,
+				"{\"ID\":\"5\",\"LABEL\":\"\",\"QUANTITY\":\"11\"}", key -> key);
+			var withEmptyText = JdbcTableEditor.previewTableRows(database, DbType.H2, table);
+			assertEquals(List.of("5", "", "11"), withEmptyText.result().rows().getLast());
+			assertThrows(SQLException.class,
+				() -> JdbcTableEditor.insertTableRow(connection, DbType.H2, withNull, "{\"ID\":3,\"QUANTITY\":11}", key -> key));
+			assertTrue(connection.getAutoCommit());
+
+			var stale = withNull;
+			database.executeSql("UPDATE sample SET label = 'changed' WHERE id = 1", 10, 5);
+			assertThrows(SQLException.class, () -> JdbcTableEditor.deleteTableRow(connection, DbType.H2, stale, 0, key -> key));
+			assertTrue(connection.getAutoCommit());
+			assertEquals(1, database.executeSql("SELECT id FROM sample WHERE id = 1", 10, 5).rows().size());
+
+			var fresh = JdbcTableEditor.previewTableRows(database, DbType.H2, table);
+			int rowToDelete = fresh.result().rows().stream().map(row -> row.getFirst()).toList().indexOf("2");
+			JdbcTableEditor.deleteTableRow(connection, DbType.H2, fresh, rowToDelete, key -> key);
+			assertTrue(connection.getAutoCommit());
+			assertTrue(database.executeSql("SELECT id FROM sample WHERE id = 2", 10, 5).rows().isEmpty());
 		}
 	}
 
@@ -418,6 +885,44 @@ class MyBatisGeneratorCompatibilityTest {
 		String longLiteral = "SELECT '" + "x''".repeat(10_000) + "' FROM [team ]] one].or";
 		assertEquals(List.of("[order ]] log]"), JdbcSqlCompletion.suggestSqlIdentifiers(
 			DbType.SqlServer, longLiteral, longLiteral.length(), List.of(table), null, List.of()));
+	}
+
+	/** 同名表按控制台绑定的库或模式解析，显式限定名仍可跨范围。 */
+	@Test
+	void resolvesSqlCompletionInConsoleCatalog() {
+		var first = new JdbcTable("first_db", null, "note", "TABLE", "");
+		var second = new JdbcTable("second_db", null, "note", "TABLE", "");
+		String local = "SELECT n.am FROM note n";
+		String explicit = "SELECT n.am FROM first_db.note n";
+		String withoutAlias = "SELECT note.am FROM first_db.note WHERE note.id = 1";
+		int caret = local.indexOf(" FROM");
+		for (DbType type : List.of(DbType.MySQL, DbType.MariaDB)) {
+			assertEquals(second, JdbcSqlCompletion.resolveSqlCompletionTable(type, local, caret,
+				List.of(first, second), first, "second_db"));
+			assertEquals(first, JdbcSqlCompletion.resolveSqlCompletionTable(type, explicit, caret,
+				List.of(first, second), second, "second_db"));
+			assertEquals(first, JdbcSqlCompletion.resolveSqlCompletionTable(type, withoutAlias, withoutAlias.indexOf(" FROM"),
+				List.of(first, second), second, "second_db"));
+			assertEquals(null, JdbcSqlCompletion.resolveSqlCompletionTable(type, local, caret,
+				List.of(first), first, "second_db"));
+		}
+		var firstSchema = new JdbcTable("test", "first_db", "note", "TABLE", "");
+		var secondSchema = new JdbcTable("test", "second_db", "note", "TABLE", "");
+		String ambiguous = "SELECT note.am FROM first_db.note JOIN second_db.note ON 1 = 1";
+		assertEquals(null, JdbcSqlCompletion.resolveSqlCompletionTable(DbType.MySQL, ambiguous,
+			ambiguous.indexOf(" FROM"), List.of(first, second), second, "second_db"));
+		var column = new IntellijColumnInfo();
+		column.setName("amount");
+		assertTrue(JdbcSqlCompletion.suggestSqlIdentifiers(DbType.MySQL, ambiguous,
+			ambiguous.indexOf(" FROM"), List.of(first, second), second, List.of(column)).isEmpty());
+		for (DbType type : List.of(DbType.PostgreSQL, DbType.H2)) {
+			assertEquals(secondSchema, JdbcSqlCompletion.resolveSqlCompletionTable(type, local, caret,
+				List.of(firstSchema, secondSchema), firstSchema, "second_db"));
+			assertEquals(firstSchema, JdbcSqlCompletion.resolveSqlCompletionTable(type, explicit, caret,
+				List.of(firstSchema, secondSchema), secondSchema, "second_db"));
+			assertEquals(firstSchema, JdbcSqlCompletion.resolveSqlCompletionTable(type, withoutAlias, withoutAlias.indexOf(" FROM"),
+				List.of(firstSchema, secondSchema), secondSchema, "second_db"));
+		}
 	}
 
 	/** PostgreSQL dollar-quoted 字符串里的别名与分号不参与补全。 */
@@ -824,7 +1329,7 @@ class MyBatisGeneratorCompatibilityTest {
 			new NoSqlConnectionProfile(UUID.randomUUID(), "文档", NoSqlSourceType.MONGODB,
 				"mongodb://localhost:27017/?replicaSet=fixture", "user", "admin", false, false, 0),
 			new NoSqlConnectionProfile(UUID.randomUUID(), "搜索", NoSqlSourceType.ELASTICSEARCH,
-				"https://localhost:9200/es", "", "", false, false, 0));
+				"https://localhost:9200/es", "search-reader", "", false, false, 0));
 		for (var profile : profiles) {
 			var writer = new StringWriter();
 			profile.writeProfile(writer);
@@ -932,6 +1437,37 @@ class MyBatisGeneratorCompatibilityTest {
 	}
 
 	/**
+	 * 手工赋值的复合主键应进入 INSERT，并保持主键映射顺序。
+	 *
+	 * @param workspace 本次生成使用的临时输出目录
+	 * @throws Exception 代码生成或读取失败
+	 */
+	@Test
+	void keepsAssignedCompositeKeysInGeneratedInsert(@TempDir Path workspace) throws Exception {
+		var table = sampleTable();
+		var id = table.getPrimaryKeyColumns().getFirst();
+		id.setAutoIncrement(false);
+		id.setKeySeq((short) 2);
+		var tenant = new IntellijColumnInfo();
+		tenant.setName("tenant_id");
+		tenant.setDataType(Types.BIGINT);
+		tenant.setKeySeq((short) 1);
+		table.setColumnInfos(List.of(id, tenant));
+		table.setPrimaryKeyColumns(List.of(tenant, id));
+
+		var generator = buildSampleGenerator(workspace, workspace, new GenerationTable(table, DbType.H2, ""));
+		assertTrue(IdeaTableConnectionFactory.generateMapperFiles(generator, table).isEmpty());
+		String mapper = Files.readString(workspace.resolve("fixture/SampleMapper.xml"));
+		assertFalse(mapper.contains("useGeneratedKeys"));
+		var insert = Pattern.compile("(?s)<insert id=\"insert\"[^>]*>(.*?)</insert>").matcher(mapper);
+		assertTrue(insert.find(), mapper);
+		assertTrue(insert.group(1).contains("#{id,jdbcType=BIGINT}"), insert.group(1));
+		assertTrue(insert.group(1).contains("#{tenantId,jdbcType=BIGINT}"), insert.group(1));
+		int tenantMapping = mapper.indexOf("<id column=\"tenant_id\"");
+		assertTrue(tenantMapping >= 0 && tenantMapping < mapper.indexOf("<id column=\"id\""), mapper);
+	}
+
+	/**
 	 * 创建使用本项目元数据和列备注扩展的 MyBatis3 生成上下文。
 	 *
 	 * @param javaOutput Java 输出目录
@@ -942,10 +1478,10 @@ class MyBatisGeneratorCompatibilityTest {
 	private MyBatisGenerator buildSampleGenerator(Path javaOutput, Path xmlOutput, GenerationTable table) {
 		var settings = new Config();
 		settings.setTableName(table.tableInfo().getTableName());
-		settings.setUseSchemaPrefix(!table.qualifier().isEmpty());
+		settings.setUseSchemaPrefix(Objects.nonNull(table.qualifier()) && !table.qualifier().isEmpty());
 		settings.setModelName("Sample");
 		settings.setDaoName("SampleMapper");
-		settings.setPrimaryKey("id");
+		settings.setPrimaryKey(table.defaultGeneratedKeyColumn());
 		settings.setUseExample(true);
 		Configuration configuration = new Configuration();
 		var context = new Context.Builder().withId("test").withTargetRuntime("MyBatis3")
@@ -978,7 +1514,6 @@ class MyBatisGeneratorCompatibilityTest {
 		id.setDataType(Types.BIGINT);
 		id.setKeySeq((short) 1);
 		id.setAutoIncrement(true);
-		id.setGeneratedColumn(true);
 		id.setNullable(false);
 
 		IntellijColumnInfo created = new IntellijColumnInfo();

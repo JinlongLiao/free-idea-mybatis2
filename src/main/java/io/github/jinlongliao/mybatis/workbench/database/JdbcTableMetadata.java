@@ -51,6 +51,39 @@ public final class JdbcTableMetadata {
 	}
 
 	/**
+	 * 按连接账号可见的范围读取数据库名称。
+	 *
+	 * @param metadata 当前连接的元数据
+	 * @return 驱动可见的目录名称
+	 * @throws SQLException 读取目录失败
+	 */
+	public static List<String> listCatalogNames(DatabaseMetaData metadata) throws SQLException {
+		List<String> names = new ArrayList<>();
+		try (ResultSet rows = metadata.getCatalogs()) {
+			while (rows.next()) {
+				names.add(rows.getString(1));
+			}
+		}
+		return List.copyOf(names);
+	}
+
+	/**
+	 * 按顺序读取用户勾选目录的表，不变更 JDBC 会话的默认目录。
+	 *
+	 * @param metadata 当前连接的元数据
+	 * @param catalogs 用户勾选的原始目录名称
+	 * @return 每个已选目录中的表和视图
+	 * @throws SQLException 任一目录无法读取
+	 */
+	public static List<JdbcTable> listTablesInCatalogs(DatabaseMetaData metadata, List<String> catalogs) throws SQLException {
+		List<JdbcTable> tables = new ArrayList<>();
+		for (String catalog : catalogs) {
+			tables.addAll(listTables(metadata, catalog, null));
+		}
+		return List.copyOf(tables);
+	}
+
+	/**
 	 * 读取已选表的结构。参数应来自同一连接的表清单，连接生命周期由调用方管理。
 	 * 列查询使用 JDBC 模式转义，避免同名表或名称中包含通配符时串读。
 	 *
@@ -100,6 +133,8 @@ public final class JdbcTableMetadata {
 				if (Objects.isNull(key)) {
 					throw new SQLException("JDBC primary key metadata references an unknown column: " + name);
 				}
+				// 主键约束保证列非空；部分 SQLite JDBC 驱动会错误地把 rowid 主键报告为 nullable。
+				key.setNullable(false);
 				key.setKeySeq(rows.getShort("KEY_SEQ"));
 				primaryKeys.add(key);
 			}

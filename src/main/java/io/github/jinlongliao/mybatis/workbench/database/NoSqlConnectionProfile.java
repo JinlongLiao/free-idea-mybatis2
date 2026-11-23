@@ -17,7 +17,7 @@ import java.util.function.Function;
  * @param name                   数据源显示名称
  * @param type                   连接协议
  * @param endpoint               节点地址或 URI，不含密钥
- * @param username               Redis 或 MongoDB 认证用户
+ * @param username               Redis、MongoDB 或 Elasticsearch Basic 认证用户；留空时 Elasticsearch 使用 API Key
  * @param authenticationDatabase MongoDB 用户所属数据库
  * @param cluster                Redis Cluster 模式
  * @param tls                    Redis TLS 开关，MongoDB 和 Elasticsearch 由连接地址决定
@@ -99,6 +99,9 @@ public record NoSqlConnectionProfile(UUID id, String name, NoSqlSourceType type,
 					|| Objects.nonNull(address.getRawUserInfo()) || Objects.nonNull(address.getRawQuery())
 					|| Objects.nonNull(address.getRawFragment())) {
 					throw new IllegalArgumentException(validationMessage.apply("nosql.profile.elasticsearch.url"));
+				}
+				if (username.indexOf(':') >= 0 || username.indexOf('\r') >= 0 || username.indexOf('\n') >= 0) {
+					throw new IllegalArgumentException(validationMessage.apply("nosql.profile.elasticsearch.username"));
 				}
 			}
 		}

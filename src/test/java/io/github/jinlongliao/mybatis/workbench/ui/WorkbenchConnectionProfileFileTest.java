@@ -117,4 +117,39 @@ class WorkbenchConnectionProfileFileTest {
 		assertFalse(originalKey.equals(restoredTlsKey));
 	}
 
+	/** 同一连接 ID 更新 MongoDB 认证库时，接收端必须重新绑定凭据。 */
+	@Test
+	void bindsMongoCredentialsToAuthenticationDatabaseAfterSync() {
+		var id = UUID.randomUUID();
+		var original = new NoSqlConnectionProfile(id, "Mongo", NoSqlSourceType.MONGODB,
+			"mongodb://localhost:27017/notes", "reader", "notes", false, false, 0);
+		var changed = new NoSqlConnectionProfile(id, "Mongo", NoSqlSourceType.MONGODB,
+			"mongodb://localhost:27017/notes", "reader", "admin", false, false, 0);
+		var sender = new WorkbenchConnectionProfiles();
+		var receiver = new WorkbenchConnectionProfiles();
+		receiver.saveNoSqlProfile(original);
+		sender.saveNoSqlProfile(changed);
+		receiver.loadState(sender.getState());
+		var restored = receiver.listNoSqlProfiles().getFirst();
+		assertEquals(changed, restored);
+		assertFalse(WorkbenchNoSqlSourceEditor.noSqlCredentialKey(original)
+			.equals(WorkbenchNoSqlSourceEditor.noSqlCredentialKey(restored)));
+	}
+
+	/** Basic 用户名变更后重新绑定 PasswordSafe 凭据，API Key 模式仍以空用户名区分。 */
+	@Test
+	void bindsElasticsearchCredentialsToAuthenticationMode() {
+		var id = UUID.randomUUID();
+		var basic = new NoSqlConnectionProfile(id, "Search", NoSqlSourceType.ELASTICSEARCH,
+			"https://localhost:9200", "reader", "", false, true, 0);
+		var renamedUser = new NoSqlConnectionProfile(id, "Search", NoSqlSourceType.ELASTICSEARCH,
+			"https://localhost:9200", "writer", "", false, true, 0);
+		var apiKey = new NoSqlConnectionProfile(id, "Search", NoSqlSourceType.ELASTICSEARCH,
+			"https://localhost:9200", "", "", false, true, 0);
+		assertFalse(WorkbenchNoSqlSourceEditor.noSqlCredentialKey(basic)
+			.equals(WorkbenchNoSqlSourceEditor.noSqlCredentialKey(renamedUser)));
+		assertFalse(WorkbenchNoSqlSourceEditor.noSqlCredentialKey(basic)
+			.equals(WorkbenchNoSqlSourceEditor.noSqlCredentialKey(apiKey)));
+	}
+
 }
